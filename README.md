@@ -7,14 +7,17 @@ Also exposes an **MCP endpoint** with 6 tools so Claude Code, Claude Desktop, Co
 ## Architecture
 
 ```
-JS SPA Docs → Crawl4AI (Playwright) → fit_markdown (main content extraction)
+JS SPA Docs → Crawl4AI (Playwright, --ignore-certificate-errors) → fit_markdown
     → Metadata extraction (page title, section headings, content type)
+    → Auto-register discovered pages (parent_url_id lineage tracking)
     → Chunk (400 tokens, 80-token overlap, paragraph boundaries, tiktoken-cl100k)
     → multi-qa-mpnet-base-cos-v1 (768d) → Qdrant
     → FastAPI /search → Cross-encoder rerank → Source diversity → Low-CE hints
 
 LLM/Agent → MCP /mcp/ → list_labels() / search_docs() / get_chunks_for_url() /
     get_adjacent_chunks() / add_url_to_crawl() / trigger_crawl()
+    
+Ingestion: background thread (threading.Thread) — never blocks the API event loop
 ```
 
 ## Quick Start
@@ -98,7 +101,7 @@ The web dashboard at `http://localhost:8000/` provides:
 
 ## MCP Endpoint — LLM Integration
 
-The server exposes an **MCP (Model Context Protocol)** endpoint at `/mcp/`. LLM agents can call 4 tools.
+The server exposes an **MCP (Model Context Protocol)** endpoint at `/mcp/`. LLM agents can call 6 tools.
 
 ### MCP Tools
 
@@ -108,8 +111,8 @@ The server exposes an **MCP (Model Context Protocol)** endpoint at `/mcp/`. LLM 
 | `search_docs(query, limit, labels, label_match_mode)` | Semantic search with full-chunk content, enriched metadata (page title, section heading, content type), cross-encoder rerank, multi-label filter, boost mode, source diversity, low-CE hints |
 | `get_chunks_for_url(url, limit, offset)` | Fetch all chunks from a URL (paginated) — explore full document context after a promising search hit |
 | `get_adjacent_chunks(url, chunk_index, page_index, window)` | Fetch surrounding chunks — see what comes before/after a specific chunk |
-| `add_url_to_crawl(url, labels, deep_crawl, depth, patterns)` | Add documentation URL with multi-label and deep crawl config |
-| `trigger_crawl(mode)` | Start background crawl: `"all"` recrawls everything, `"new"` only pending/failed |
+| `add_url_to_crawl(url, labels, deep_crawl, depth, patterns)` | Add documentation URL with multi-label and deep crawl config. Auto-registers discovered pages during deep crawl |
+| `trigger_crawl(mode)` | Start background crawl in a dedicated thread (non-blocking): `"all"` recrawls everything, `"new"` only pending/failed |
 
 ### Configure in Claude Code
 
@@ -225,6 +228,15 @@ curl -s -X POST http://localhost:8000/mcp/ \
 
 All configurable via the dashboard UI or `PUT /config`.
 
+## Deep Crawl Auto-Registration
+
+When deep crawl is enabled, discovered pages are automatically registered as their own URL records with `parent_url_id` pointing to the seed. This means:
+
+- **Each page gets its own row** in the URLs table — independent status tracking, re-crawl, and delete
+- **Chunks stored under actual page URL** — search results show the correct source, not all under the seed
+- **Cascade delete** — deleting a seed URL removes all its discovered children and their Qdrant vectors
+- **Lineage visible** — `/urls` returns `parent_url_id` (null for seeds, integer for auto-discovered)
+
 ## Full Container Mode
 
 ```bash
@@ -270,7 +282,7 @@ internal-doc-search/
 ├── data/               # SQLite database (persisted volume)
 ├── .cache/             # HF models cache (persisted volume)
 ├── static/             # Web UI (Tailwind CSS, index.html)
-└── tests/              # 86 tests across 5 files
+└── tests/              # 120+ tests across 7 files
 ```
 
 ## Tech Stack

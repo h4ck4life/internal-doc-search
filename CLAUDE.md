@@ -82,7 +82,11 @@ python ingest.py
 Or add per-project: `claude mcp add --transport http doc-search http://localhost:8000/mcp/`
 Or add globally: `claude mcp add --scope user --transport http doc-search http://localhost:8000/mcp/`
 
-**Background ingest**: `POST /ingest` spawns `asyncio.create_task(_background_ingest())` which calls `ingest.run_ingest(on_progress=callback)`. Progress tracked in module-level `_ingest_state` dict, polled via `GET /ingest/status`. Frontend polls every 1s during crawl.
+**Background ingest**: `POST /ingest` spawns a `threading.Thread` with its own asyncio event loop running `ingest.run_ingest()`. The main API event loop is never blocked — homepage stays responsive during crawl. Progress tracked in module-level `_ingest_state` dict, polled via `GET /ingest/status`. Frontend polls every 1s during crawl. `ingest.py` also supports standalone CLI: `python ingest.py --mode {all|new}`.
+
+**Deep crawl auto-registration**: During BFS deep crawl, each discovered page is auto-registered as its own `urls` row via `add_discovered_url()` with `status='pending'`, labels inherited from the seed, and `parent_url_id` pointing to the seed. Chunks are stored under the actual page URL (not the seed). After chunks are upserted, the page is marked `'completed'`. `list_urls()` returns `parent_url_id` (NULL = seed, non-NULL = auto-discovered). `delete_url()` cascades — returns list of all affected URLs (parent + children) for Qdrant vector cleanup.
+
+**SSL certificate errors**: Crawl4AI browser launched with `--ignore-certificate-errors` in extra_args — allows crawling internal/self-signed HTTPS sites.
 
 **Vector cleanup on URL delete**: `DELETE /urls/{id}` removes vectors from Qdrant via `FilterSelector` matching on `url` payload key, then deletes from SQLite.
 
