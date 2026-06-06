@@ -1,75 +1,10 @@
-"""Ingestion pipeline: crawl docs → clean → chunk → embed → store in Qdrant."""
+"""Ingestion pipeline: crawl docs → chunk → embed → store in Qdrant."""
 
 import asyncio
 import os
 import re
 import uuid
 from typing import Dict, List, Optional
-
-# Patterns for stripping nav/footer/sidebar junk from crawled markdown.
-# These regexes are applied line-by-line; matching lines are dropped.
-_CLEANUP_PATTERNS: list[re.Pattern] = [
-    # Common "skip to content" accessibility links
-    re.compile(r"^\s*\[?(?:Skip|Jump)\s+(?:to|past)\s+(?:the\s+)?(?:main\s+)?(?:content|navigation|nav|footer|sidebar)", re.IGNORECASE),
-    # Typical footer lines
-    re.compile(r"^\s*(?:Copyright|©)\s+\d{4}", re.IGNORECASE),
-    re.compile(r"^\s*(?:All rights reserved|Terms of (?:Service|Use)|Privacy\s*Policy|Cookie\s*(?:Policy|Notice|Consent))", re.IGNORECASE),
-    # Nav sidebar markers (headings like "Navigation", "On this page")
-    re.compile(r"^\s*#+\s*(?:Navigation|On\s+this\s+page|Table\s+of\s+contents|Site\s*nav|Sidebar)\s*$", re.IGNORECASE),
-    # Pure nav link lists: "[link](/path)" or "* **[link](/path)**" repeated
-    # Individual nav links are hard to detect, but we can catch headings that signal nav sections
-    re.compile(r"^\s*\[(?:Previous|Next|Back|Home)\]\s*\(.*\)\s*$", re.IGNORECASE),
-    # Empty markdown links (navigation breadcrumbs often produce these)
-    re.compile(r"^\s*\[\]\s*\(.*\)\s*$"),
-    # Cookie / consent banners
-    re.compile(r"^\s*(?:This\s+(?:site|website)\s+uses\s+cookies|We\s+use\s+cookies|Accept\s+(?:all\s+)?cookies)", re.IGNORECASE),
-    # "Last updated" / "Was this page helpful?" footer patterns
-    re.compile(r"^\s*(?:Last\s+(?:updated|modified)|Was\s+this\s+(?:page|article|doc)\s+helpful)", re.IGNORECASE),
-    # Social media / share links (single-line "[Share on X](...)" etc.)
-    re.compile(r"^\s*\[(?:Share|Follow|Tweet|Star|Fork)\s+(?:on\s+)?\w*\]\s*\(.*\)\s*$", re.IGNORECASE),
-    # Empty or whitespace-only lines (handled by regex below, but explicit)
-    re.compile(r"^\s*$"),
-]
-
-# Also strip multi-line blocks that are clearly nav: consecutive lines that are
-# mostly bare links with short link text (typical of sidebar nav).
-_NAV_LINK_LINE = re.compile(r"^\s*(?:\*|-|\d+\.)\s*\[([^\]]{1,30})]\([^)]+\)\s*$")
-
-
-def clean_markdown(md: str) -> str:
-    """Strip navigation, footer, sidebar, and other boilerplate from crawled markdown.
-
-    Applied as a line-by-line filter; multi-pass for consecutive-blank compression.
-    """
-    lines = md.split("\n")
-    cleaned: list[str] = []
-    in_nav_block = False
-
-    for i, line in enumerate(lines):
-        # Skip lines matching any cleanup pattern
-        if any(pat.search(line) for pat in _CLEANUP_PATTERNS):
-            continue
-
-        # Detect start of a nav-link block: 3+ consecutive nav-link-looking lines
-        if _NAV_LINK_LINE.search(line):
-            if i > 0 and _NAV_LINK_LINE.search(lines[i - 1]):
-                in_nav_block = True
-            elif i < len(lines) - 1 and _NAV_LINK_LINE.search(lines[i + 1]):
-                if i + 2 < len(lines) and _NAV_LINK_LINE.search(lines[i + 2]):
-                    in_nav_block = True
-            if in_nav_block:
-                continue
-        else:
-            in_nav_block = False
-
-        cleaned.append(line)
-
-    text = "\n".join(cleaned)
-
-    # Collapse 3+ consecutive blank lines into 2
-    text = re.sub(r"\n{3,}", "\n\n", text)
-
-    return text.strip()
 
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
 from crawl4ai.deep_crawling import BFSDeepCrawlStrategy
@@ -162,21 +97,26 @@ async def _crawl_single_url(
                 # Skip results whose URL matches any exclude pattern
                 if excl_pats and any(_wildcard_match(result_url, pat) for pat in excl_pats):
                     continue
+                # Prefer fit_markdown (extracts main content, strips nav/footer/sidebar).
+                # Falls back to raw markdown if fit_markdown is empty or None.
                 md = r.markdown
-                if isinstance(md, str):
-                    markdowns.append(md)
-                else:
-                    markdowns.append(getattr(md, "raw_markdown", str(md)))
+                if hasattr(md, 'fit_markdown'):
+                    md = md.fit_markdown or md
+                if not isinstance(md, str):
+                    md = getattr(md, "raw_markdown", str(md))
+                markdowns.append(md)
         return markdowns
     else:
         config = CrawlerRunConfig(cache_mode=CacheMode.BYPASS)
         result = await crawler.arun(url=url, config=config)
         if result.success:
+            # Prefer fit_markdown (extracts main content); fall back to raw markdown
             md = result.markdown
-            if isinstance(md, str):
-                return [md]
-            else:
-                return [getattr(md, "raw_markdown", str(md))]
+            if hasattr(md, 'fit_markdown'):
+                md = md.fit_markdown or md
+            if not isinstance(md, str):
+                md = getattr(md, "raw_markdown", str(md))
+            return [md]
         else:
             raise RuntimeError(result.error_message or "Unknown crawl error")
 
@@ -258,16 +198,29 @@ async def run_ingest(on_progress=None, only_pending: bool = False) -> Dict:
                 url_labels = url_entry.get("labels") or ([label] if label else [])
                 if not url_labels:
                     url_labels = [""]  # always store at least one copy (with empty label)
+
+                # Delete old vectors for this URL before re-ingesting.
+                # Without this, re-crawling accumulates stale chunks (nav junk, old content)
+                # alongside the new cleaned chunks — upsert only adds/updates, never purges.
+                await client.delete(
+                    collection_name=COLLECTION_NAME,
+                    points_selector=models.FilterSelector(
+                        filter=models.Filter(
+                            must=[models.FieldCondition(
+                                key="url",
+                                match=models.MatchValue(value=url),
+                            )]
+                        )
+                    ),
+                )
+
                 all_points = []
                 for page_idx, md_text in enumerate(markdowns):
                     if not md_text or not md_text.strip():
                         continue
-                    # Strip nav/footer/sidebar boilerplate before chunking
-                    cleaned_text = clean_markdown(md_text)
-                    if not cleaned_text:
-                        print(f"  Page {page_idx} empty after cleanup, skipped")
-                        continue
-                    chunks = chunk_text(cleaned_text, max_chars=max_chars, overlap=overlap)
+                    # fit_markdown already strips nav/footer/sidebar during crawl.
+                    # We chunk the cleaned output directly — no regex post-processing.
+                    chunks = chunk_text(md_text, max_chars=max_chars, overlap=overlap)
                     for chunk_idx, chunk in enumerate(chunks):
                         embedding = model.encode(chunk).tolist()
                         for lbl in url_labels:
