@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Internal Doc Search</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2.0.6/css/pico.min.css">
+<style>
+  :root { --pico-font-size: 14px; }
+  .container { max-width: 1200px; padding: 1rem; }
+  .app-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 1rem; flex-wrap: wrap; gap: 0.75rem; }
+  .app-header hgroup { margin: 0; }  .app-header h1 { margin: 0; }
+  .stats-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.75rem; margin-bottom: 1rem; }
+  .stat-card { text-align: center; padding: 0.75rem; background: var(--pico-card-background-color); border: 1px solid var(--pico-card-border-color); border-radius: var(--pico-border-radius); }
+  .stat-value { font-size: 1.4rem; font-weight: 700; line-height: 1.2; }
+  .stat-label { font-size: 0.7rem; text-transform: uppercase; opacity: 0.55; letter-spacing: 0.05em; }
+  .cols-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 1rem; }
+  details { margin-bottom: 0; }
+  details article { margin: 0; border-top-left-radius: 0; border-top-right-radius: 0; }
+  details[open] > summary { border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
+  details > summary { cursor: pointer; user-select: none; padding: 0.55rem 1rem; font-weight: 600; font-size: 0.95rem; background: var(--pico-card-background-color); border: 1px solid var(--pico-card-border-color); border-radius: var(--pico-border-radius); }
+  details > summary:hover { background: var(--pico-secondary-hover-background); }
+  details > article { border-top: none; }
+
+  /* Forms */
+  .add-url-row { display: flex; gap: 0.5rem; align-items: flex-end; margin-bottom: 0.75rem; flex-wrap: wrap; }
+  .add-url-row input[type="url"] { flex: 2; min-width: 180px; }
+  .add-url-row input[type="text"] { flex: 1; min-width: 100px; }
+  .add-url-row button { flex-shrink: 0; }
+  .deep-row { display: flex; gap: 0.5rem; align-items: center; margin-bottom: 0.75rem; font-size: 0.82rem; }
+  .deep-row input[type="number"] { width: 70px; padding: 0.25rem 0.4rem; }
+  .deep-row label { margin: 0; display: flex; align-items: center; gap: 0.25rem; }
+
+  /* Table */
+  .url-col { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
+  td .btn-icon { padding: 0.15rem 0.4rem; margin: 0 0.1rem; font-size: 0.75rem; }
+  .badge { display: inline-block; padding: 0.1rem 0.5rem; border-radius: 1rem; font-size: 0.7rem; font-weight: 600; text-align: center; min-width: 60px; }
+  .badge-completed { background: #14532d; color: #4ade80; }
+  .badge-pending { background: #3b2f00; color: #facc15; }
+  .badge-failed { background: #450a0a; color: #f87171; }
+  .badge-crawling { background: #1e3a5f; color: #6c8cff; }
+
+  /* Config */
+  .config-field { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.6rem; }
+  .config-field label { width: 130px; min-width: 130px; margin: 0; font-size: 0.85rem; }
+  .config-field input { width: 100px; flex-shrink: 0; }
+  .config-field .hint { font-size: 0.72rem; opacity: 0.45; flex-shrink: 0; }
+  .config-actions { display: flex; gap: 0.5rem; margin-top: 0.75rem; }
+
+  /* Search */
+  .result-card { margin-bottom: 0.5rem; }
+  .result-meta { font-size: 0.8rem; opacity: 0.65; margin-bottom: 0.4rem; display: flex; gap: 1rem; flex-wrap: wrap; }
+  .result-content { white-space: pre-wrap; font-size: 0.88rem; line-height: 1.55; }
+  .result-url { font-size: 0.78rem; margin-top: 0.4rem; word-break: break-all; }
+  .score-high { color: #4ade80; font-weight: 700; }  .score-mid { color: #facc15; font-weight: 700; }  .score-low { color: #f87171; font-weight: 700; }
+
+  /* Progress */
+  .progress-bar { height: 6px; background: var(--pico-muted-border-color); border-radius: 3px; margin: 0.5rem 0; overflow: hidden; }
+  .progress-fill { height: 100%; background: var(--pico-primary); border-radius: 3px; transition: width 0.3s; }
+  .progress-text { font-size: 0.8rem; opacity: 0.7; }
+
+  /* Endpoints */
+  .ep-row { display: flex; gap: 1rem; font-size: 0.82rem; padding: 0.3rem 0; border-bottom: 1px solid var(--pico-muted-border-color); }
+  .ep-row:last-child { border-bottom: none; }
+  .ep-method { font-weight: 700; min-width: 55px; flex-shrink: 0; }
+  .ep-method.get { color: #4ade80; } .ep-method.post { color: #facc15; } .ep-method.put { color: #6c8cff; } .ep-method.delete { color: #f87171; }
+  .ep-path { font-family: var(--pico-font-family-monospace); font-size: 0.8rem; min-width: 155px; flex-shrink: 0; }
+  .ep-desc { opacity: 0.6; }
+
+  .hidden { display: none !important; }
+  .spinner { display: inline-block; width: 1rem; height: 1rem; border: 2px solid transparent; border-top-color: var(--pico-primary); border-radius: 50%; animation: spin 0.6s linear infinite; vertical-align: middle; margin-right: 0.3rem; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .status-msg { font-size: 0.85rem; margin-top: 0.4rem; }
+  .status-msg mark { display: inline-block; padding: 0.15rem 0.6rem; border-radius: var(--pico-border-radius); }
+  @media (max-width: 768px) { .cols-2,.stats-row { grid-template-columns: 1fr 1fr; } .config-field{flex-wrap:wrap;gap:0.3rem} .config-field label{width:100%} .ep-row{flex-wrap:wrap;gap:0.2rem} .ep-desc{width:100%} }
+</style>
+</head>
+<body>
+<main class="container">
+
+  <div class="app-header">
+    <hgroup>
+      <h1>🔍 Internal Doc Search</h1>
+      <p style="margin:0;opacity:0.5">Semantic search for your documentation</p>
+    </hgroup>
+    <button id="crawlBtn" onclick="triggerCrawl()">🔄 Re-Crawl All</button>
+  </div>
+
+  <div id="crawlMsg" class="status-msg hidden"></div>
+
+  <!-- Stats -->
+  <div class="stats-row">
+    <div class="stat-card"><div class="stat-value" id="statUrls">-</div><div class="stat-label">URLs</div></div>
+    <div class="stat-card"><div class="stat-value" id="statCrawled">-</div><div class="stat-label">Crawled</div></div>
+    <div class="stat-card"><div class="stat-value" id="statChunks">-</div><div class="stat-label">Chunks</div></div>
+    <div class="stat-card"><div class="stat-value" id="statLastCrawl">-</div><div class="stat-label">Last Crawl</div></div>
+  </div>
+
+  <!-- Search -->
+  <article style="margin-bottom:1rem">
+    <h2 style="margin-top:0">🔎 Search</h2>
+    <div class="add-url-row">
+      <input type="search" id="searchQuery" placeholder='e.g. "How does OAuth token refresh work?"' onkeydown="if(event.key==='Enter')doSearch()" style="flex:3">
+      <button id="searchBtn" onclick="doSearch()">Search</button>
+    </div>
+    <div id="searchResults" style="margin-top:0.75rem"></div>
+  </article>
+
+  <div class="cols-2">
+
+    <!-- URLs -->
+    <details open>
+      <summary>🔗 URLs</summary>
+      <article>
+        <div class="add-url-row">
+          <input type="url" id="newUrl" placeholder="https://docs.example.com">
+          <input type="text" id="newLabel" placeholder="Label">
+          <button onclick="addUrl()">+ Add</button>
+        </div>
+        <div class="deep-row">
+          <label><input type="checkbox" id="newDeepCrawl"> Deep crawl</label>
+          <span style="opacity:0.5">max depth</span>
+          <input type="number" id="newDeepDepth" value="3" min="1" max="10">
+        </div>
+        <div id="urlMsg" class="status-msg hidden"></div>
+        <div style="overflow-x:auto">
+          <table style="margin:0">
+            <thead><tr><th>URL</th><th>Label</th><th>Crawl</th><th>Status</th><th>Chunks</th><th></th></tr></thead>
+            <tbody id="urlTbody"><tr><td colspan="6" style="text-align:center;opacity:0.4">Loading...</td></tr></tbody>
+          </table>
+        </div>
+        <div id="editRow" class="add-url-row hidden" style="margin-top:0.5rem;padding-top:0.5rem;border-top:1px solid var(--pico-muted-border-color)">
+          <input type="url" id="editUrl" placeholder="URL">
+          <input type="text" id="editLabel" placeholder="Label">
+          <button onclick="saveEdit()">Save</button>
+          <button class="secondary" onclick="cancelEdit()">Cancel</button>
+        </div>
+        <div id="editDeepRow" class="deep-row hidden" style="margin-top:0">
+          <label><input type="checkbox" id="editDeepCrawl"> Deep crawl</label>
+          <span style="opacity:0.5">max depth</span>
+          <input type="number" id="editDeepDepth" value="3" min="1" max="10">
+        </div>
+      </article>
+    </details>
+
+    <!-- Config -->
+    <details>
+      <summary>⚙️ Configuration</summary>
+      <article>
+        <form id="configForm" onsubmit="saveConfig(event)">
+          <div class="config-field"><label for="cfgChunkMaxChars">Chunk size</label><input type="number" id="cfgChunkMaxChars" min="500" max="5000" step="100"><span class="hint">500–5000 chars</span></div>
+          <div class="config-field"><label for="cfgChunkOverlap">Overlap</label><input type="number" id="cfgChunkOverlap" min="0" max="500" step="50"><span class="hint">0–500 chars</span></div>
+          <div class="config-field"><label for="cfgSearchLimit">Search limit</label><input type="number" id="cfgSearchLimit" min="1" max="20"><span class="hint">1–20 results</span></div>
+          <div class="config-field"><label for="cfgRerankCandidates">Rerank pool</label><input type="number" id="cfgRerankCandidates" min="10" max="200" step="10"><span class="hint">10–200 candidates</span></div>
+          <small style="opacity:0.4;display:block;margin-top:0.3rem">Embedding: multi-qa-mpnet-base-cos-v1 · Cross-encoder: ms-marco-MiniLM-L-6-v2</small>
+          <div class="config-actions"><button type="submit">Save</button><button type="button" class="secondary" onclick="resetConfig()">Defaults</button></div>
+        </form>
+        <div id="configMsg" class="status-msg hidden"></div>
+      </article>
+    </details>
+
+  </div>
+
+  <!-- Endpoints -->
+  <details>
+    <summary>📋 API Endpoints (12)</summary>
+    <article>
+      <div class="ep-row"><span class="ep-method get">GET</span><span class="ep-path">/search?q=&limit=</span><span class="ep-desc">Two-stage semantic search with cross-encoder reranking</span></div>
+      <div class="ep-row"><span class="ep-method get">GET</span><span class="ep-path">/health</span><span class="ep-desc">Service readiness — Qdrant connectivity check</span></div>
+      <div class="ep-row"><span class="ep-method post">POST</span><span class="ep-path">/ingest</span><span class="ep-desc">Start background re-crawl (409 if already running)</span></div>
+      <div class="ep-row"><span class="ep-method get">GET</span><span class="ep-path">/ingest/status</span><span class="ep-desc">Current crawl progress (running/total/chunks)</span></div>
+      <div class="ep-row"><span class="ep-method get">GET</span><span class="ep-path">/docs-summary</span><span class="ep-desc">URL count, chunk count, last crawl timestamp</span></div>
+      <div class="ep-row"><span class="ep-method get">GET</span><span class="ep-path">/urls</span><span class="ep-desc">List all configured crawl URLs with status</span></div>
+      <div class="ep-row"><span class="ep-method post">POST</span><span class="ep-path">/urls</span><span class="ep-desc">Add new crawl URL (deep_crawl, deep_crawl_max_depth)</span></div>
+      <div class="ep-row"><span class="ep-method put">PUT</span><span class="ep-path">/urls/{id}</span><span class="ep-desc">Update URL string, label, or deep crawl settings</span></div>
+      <div class="ep-row"><span class="ep-method delete">DEL</span><span class="ep-path">/urls/{id}</span><span class="ep-desc">Remove crawl URL</span></div>
+      <div class="ep-row"><span class="ep-method get">GET</span><span class="ep-path">/config</span><span class="ep-desc">Get all configuration values</span></div>
+      <div class="ep-row"><span class="ep-method put">PUT</span><span class="ep-path">/config</span><span class="ep-desc">Update configuration (partial update supported)</span></div>
+      <div class="ep-row" style="border-bottom:none;margin-top:0.5rem;padding-top:0.5rem;border-top:2px solid var(--pico-primary)"><span class="ep-method" style="color:#f0a0ff">MCP</span><span class="ep-path">/mcp</span><span class="ep-desc">LLM agent tools: search_docs, add_url_to_crawl, trigger_crawl</span></div>
+    </article>
+  </details>
+
+  <!-- MCP Setup Guide -->
+  <details>
+    <summary>🤖 MCP Setup — Connect LLM Agents</summary>
+    <article>
+      <p style="margin-bottom:0.75rem;opacity:0.7">Add this endpoint to your LLM client to enable semantic doc search from any agent. Three tools available: <code>search_docs</code>, <code>add_url_to_crawl</code>, <code>trigger_crawl</code>.</p>
+
+      <h3 style="font-size:0.95rem;margin-top:1rem">Claude Code</h3>
+      <p>Create <code>.mcp.json</code> in your project root or add to <code>~/.claude/claude_desktop_config.json</code>:</p>
+      <pre style="font-size:0.8rem;padding:0.5rem;border-radius:var(--pico-border-radius);background:var(--pico-code-background-color)"><code>{
+  "mcpServers": {
+    "doc-search": {
+      "type": "url",
+      "url": "http://localhost:8000/mcp"
+    }
+  }
+}</code></pre>
+
+      <h3 style="font-size:0.95rem;margin-top:1rem">Claude Desktop</h3>
+      <p>Settings → Developer → MCP Servers → Add:</p>
+      <pre style="font-size:0.8rem;padding:0.5rem;border-radius:var(--pico-border-radius);background:var(--pico-code-background-color)"><code>{
+  "doc-search": {
+    "type": "url",
+    "url": "http://localhost:8000/mcp"
+  }
+}</code></pre>
+
+      <h3 style="font-size:0.95rem;margin-top:1rem">Codex / Custom Client</h3>
+      <p>Any MCP-compatible client. Endpoint URL:</p>
+      <pre style="font-size:0.8rem;padding:0.5rem;border-radius:var(--pico-border-radius);background:var(--pico-code-background-color)"><code>http://localhost:8000/mcp</code></pre>
+    </article>
+  </details>
+
+</main>
+
+<script>
+let searchLimit = 7, pollTimer = null;
+addEventListener('DOMContentLoaded', () => { loadSummary(); loadUrls(); loadConfig(); });
+
+// ─── Crawl (background + polling) ────────────────────────────────
+async function triggerCrawl() {
+  const btn = document.getElementById('crawlBtn'), el = document.getElementById('crawlMsg');
+  btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Starting...'; el.classList.add('hidden');
+  try {
+    const r = await fetch('/ingest', { method: 'POST' });
+    const d = await r.json();
+    if (r.status === 409) {
+      el.innerHTML = '<mark style="background:#3b2f00;color:#facc15">⚠ Already running</mark>';
+      el.classList.remove('hidden'); btn.disabled = false; btn.innerHTML = '🔄 Re-Crawl All';
+    } else {
+      el.innerHTML = `<mark style="background:#1e3a5f;color:#6c8cff">⏳ Crawling ${d.total_urls} URL(s) in background…</mark>`;
+      el.classList.remove('hidden');
+      startPolling();
+    }
+  } catch(e) { el.innerHTML = `<mark style="background:#450a0a;color:#f87171">✗ ${e.message}</mark>`; el.classList.remove('hidden'); btn.disabled = false; btn.innerHTML = '🔄 Re-Crawl All'; }
+}
+
+function startPolling() {
+  if (pollTimer) clearInterval(pollTimer);
+  // Show progress bar
+  const el = document.getElementById('crawlMsg');
+  el.innerHTML = el.innerHTML + '<div class="progress-bar"><div class="progress-fill" id="progressFill" style="width:0%"></div></div><div class="progress-text" id="progressText">Starting…</div>';
+  pollTimer = setInterval(async () => {
+    try {
+      const s = await (await fetch('/ingest/status')).json();
+      const pct = s.total_urls > 0 ? Math.round((s.current_url / s.total_urls) * 100) : 0;
+      document.getElementById('progressFill').style.width = pct + '%';
+      document.getElementById('progressText').textContent = s.message || `${s.current_url}/${s.total_urls}`;
+      if (!s.running) {
+        clearInterval(pollTimer); pollTimer = null;
+        const btn = document.getElementById('crawlBtn'); btn.disabled = false; btn.innerHTML = '🔄 Re-Crawl All';
+        if (s.status === 'completed') {
+          el.innerHTML = '<mark style="background:#14532d;color:#4ade80">✓ Done — ' + s.message + '</mark>';
+        } else {
+          el.innerHTML = '<mark style="background:#450a0a;color:#f87171">✗ Failed — ' + s.message + '</mark>';
+        }
+        loadSummary(); loadUrls();
+      }
+    } catch(e) { /* retry */ }
+  }, 1000);
+}
+
+// ─── Stats ───────────────────────────────────────────────────────
+async function loadSummary() {
+  try {
+    const d = await (await fetch('/docs-summary')).json();
+    document.getElementById('statUrls').textContent = d.urls_configured ?? '-';
+    document.getElementById('statCrawled').textContent = d.urls_crawled ?? '-';
+    document.getElementById('statChunks').textContent = d.total_chunks ?? '-';
+    document.getElementById('statLastCrawl').textContent = d.last_crawl ? new Date(d.last_crawl).toLocaleString() : 'Never';
+  } catch(e) { console.error(e); }
+}
+
+// ─── URLs ────────────────────────────────────────────────────────
+async function loadUrls() {
+  const tb = document.getElementById('urlTbody');
+  try {
+    const urls = await (await fetch('/urls')).json();
+    if (!urls.length) { tb.innerHTML = '<tr><td colspan="6" style="text-align:center;opacity:0.4">No URLs yet. Add one above.</td></tr>'; return; }
+    tb.innerHTML = urls.map(u => {
+      const dc = u.deep_crawl ? `🔍 depth ${u.deep_crawl_max_depth || 3}` : '·';
+      return `<tr>
+        <td><span class="url-col" title="${esc(u.url)}">${esc(trunc(u.url, 40))}</span></td>
+        <td>${esc(u.label||'—')}</td>
+        <td style="font-size:0.78rem">${dc}</td>
+        <td><span class="badge badge-${u.status}">${u.status}</span></td>
+        <td>${u.chunk_count ?? 0}</td>
+        <td>
+          <button class="secondary btn-icon" onclick='startEdit(${u.id},"${esc(u.url)}","${esc(u.label||'')}",${u.deep_crawl||0},${u.deep_crawl_max_depth||3})' title="Edit">✏️</button>
+          <button class="secondary btn-icon" style="color:var(--pico-del-color)" onclick="removeUrl(${u.id})" title="Delete">🗑</button>
+        </td>
+      </tr>`;
+    }).join('');
+  } catch(e) { tb.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--pico-del-color)">Failed to load</td></tr>'; }
+}
+
+async function addUrl() {
+  const u = document.getElementById('newUrl').value.trim(), l = document.getElementById('newLabel').value.trim();
+  const dc = document.getElementById('newDeepCrawl').checked, dd = parseInt(document.getElementById('newDeepDepth').value) || 3;
+  if (!u) return;
+  const el = document.getElementById('urlMsg');
+  try {
+    const r = await fetch('/urls', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({url:u, label:l, deep_crawl:dc, deep_crawl_max_depth:dd}) });
+    if (r.ok) { document.getElementById('newUrl').value=''; document.getElementById('newLabel').value=''; document.getElementById('newDeepCrawl').checked=false; document.getElementById('newDeepDepth').value=3; loadUrls(); el.innerHTML='<mark style="background:#14532d;color:#4ade80">✓ Added</mark>'; }
+    else { const d = await r.json(); el.innerHTML=`<mark style="background:#450a0a;color:#f87171">✗ ${d.detail||'Error'}</mark>`; }
+  } catch(e) { el.innerHTML=`<mark style="background:#450a0a;color:#f87171">✗ ${e.message}</mark>`; }
+  finally { el.classList.remove('hidden'); setTimeout(()=>el.classList.add('hidden'),3000); }
+}
+
+let editingId = null;
+function startEdit(id, url, label, dc, dd) {
+  editingId = id;
+  document.getElementById('editUrl').value = url;
+  document.getElementById('editLabel').value = label;
+  document.getElementById('editDeepCrawl').checked = !!dc;
+  document.getElementById('editDeepDepth').value = dd || 3;
+  document.getElementById('editRow').classList.remove('hidden');
+  document.getElementById('editDeepRow').classList.remove('hidden');
+}
+function cancelEdit() { editingId = null; document.getElementById('editRow').classList.add('hidden'); document.getElementById('editDeepRow').classList.add('hidden'); }
+async function saveEdit() {
+  if (!editingId) return;
+  const u = document.getElementById('editUrl').value.trim(), l = document.getElementById('editLabel').value.trim();
+  const dc = document.getElementById('editDeepCrawl').checked, dd = parseInt(document.getElementById('editDeepDepth').value) || 3;
+  try {
+    const r = await fetch(`/urls/${editingId}`, { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({url:u||null, label:l||null, deep_crawl:dc, deep_crawl_max_depth:dd}) });
+    if (r.ok) { cancelEdit(); loadUrls(); }
+    else { const d = await r.json(); alert(d.detail||'Error'); }
+  } catch(e) { alert(e.message); }
+}
+async function removeUrl(id) { if (!confirm('Delete this URL?')) return; await fetch(`/urls/${id}`, { method:'DELETE' }); loadUrls(); }
+
+// ─── Config ──────────────────────────────────────────────────────
+async function loadConfig() {
+  try {
+    const c = await (await fetch('/config')).json();
+    document.getElementById('cfgChunkMaxChars').value = c.chunk_max_chars;
+    document.getElementById('cfgChunkOverlap').value = c.chunk_overlap;
+    document.getElementById('cfgSearchLimit').value = c.search_limit;
+    document.getElementById('cfgRerankCandidates').value = c.rerank_candidates;
+    searchLimit = c.search_limit;
+  } catch(e) { console.error(e); }
+}
+async function saveConfig(e) {
+  e.preventDefault();
+  const cfg = { chunk_max_chars: +document.getElementById('cfgChunkMaxChars').value, chunk_overlap: +document.getElementById('cfgChunkOverlap').value, search_limit: +document.getElementById('cfgSearchLimit').value, rerank_candidates: +document.getElementById('cfgRerankCandidates').value };
+  searchLimit = cfg.search_limit;
+  const el = document.getElementById('configMsg');
+  try {
+    const r = await fetch('/config', { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(cfg) });
+    if (r.ok) { el.innerHTML = '<mark style="background:#14532d;color:#4ade80">✓ Saved — re-ingest to apply chunk changes</mark>'; }
+    else { const d = await r.json(); el.innerHTML = `<mark style="background:#450a0a;color:#f87171">✗ ${d.detail||'Error'}</mark>`; }
+  } catch(e) { el.innerHTML = `<mark style="background:#450a0a;color:#f87171">✗ ${e.message}</mark>`; }
+  finally { el.classList.remove('hidden'); setTimeout(()=>el.classList.add('hidden'),5000); }
+}
+function resetConfig() { document.getElementById('cfgChunkMaxChars').value=2000; document.getElementById('cfgChunkOverlap').value=100; document.getElementById('cfgSearchLimit').value=7; document.getElementById('cfgRerankCandidates').value=50; saveConfig(new Event('submit')); }
+
+// ─── Search ──────────────────────────────────────────────────────
+async function doSearch() {
+  const q = document.getElementById('searchQuery').value.trim();
+  if (!q) return;
+  const btn = document.getElementById('searchBtn'), results = document.getElementById('searchResults');
+  btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>';
+  try {
+    const data = await (await fetch(`/search?q=${encodeURIComponent(q)}&limit=${searchLimit}`)).json();
+    if (!data.length) { results.innerHTML = '<p style="opacity:0.4;text-align:center;padding:1rem">No results found.</p>'; return; }
+    results.innerHTML = data.map(r => {
+      const ce = r.cross_encoder_score, cls = ce > 4 ? 'score-high' : ce > 2 ? 'score-mid' : 'score-low';
+      return `<article class="result-card">
+        <div class="result-meta"><span>CE <strong class="${cls}">${ce.toFixed(3)}</strong></span><span>· Qdrant ${r.score.toFixed(3)}</span><span>· Chunk #${r.chunk_index}</span></div>
+        <div class="result-content">${esc(r.content).substring(0,350)}${r.content.length>350?'…':''}</div>
+        <div class="result-url">🔗 <a href="${esc(r.url)}" target="_blank">${esc(r.url)}</a></div>
+      </article>`;
+    }).join('');
+  } catch(e) { results.innerHTML = `<p style="color:var(--pico-del-color)">Error: ${esc(e.message)}</p>`; }
+  finally { btn.disabled = false; btn.innerHTML = 'Search'; }
+}
+
+// ─── Helpers ─────────────────────────────────────────────────────
+function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function trunc(s,n) { return s.length>n ? s.substring(0,n-3)+'...' : s; }
+</script>
+</body>
+</html>
