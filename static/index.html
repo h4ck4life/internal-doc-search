@@ -226,16 +226,17 @@
           <table class="w-full text-sm">
             <thead>
               <tr class="border-b border-border text-muted text-xs uppercase tracking-wider">
-                <th class="text-left py-2 pr-2">URL</th>
-                <th class="text-left py-2 pr-2">Label</th>
-                <th class="text-left py-2 pr-2">Crawl</th>
-                <th class="text-left py-2 pr-2">Status</th>
-                <th class="text-left py-2 pr-2">Chunks</th>
+                <th class="text-left py-2 pr-2 cursor-pointer hover:text-white select-none" onclick="sortUrls('url')">URL ▾</th>
+                <th class="text-left py-2 pr-2 cursor-pointer hover:text-white select-none" onclick="sortUrls('label')">Label ▾</th>
+                <th class="text-left py-2 pr-2 cursor-pointer hover:text-white select-none" onclick="sortUrls('crawl')">Crawl ▾</th>
+                <th class="text-left py-2 pr-2 cursor-pointer hover:text-white select-none" onclick="sortUrls('status')">Status ▾</th>
+                <th class="text-left py-2 pr-2 cursor-pointer hover:text-white select-none" onclick="sortUrls('chunks')">Chunks ▾</th>
+                <th class="text-left py-2 pr-2 cursor-pointer hover:text-white select-none" onclick="sortUrls('added')">Added ▾</th>
                 <th class="text-left py-2"></th>
               </tr>
             </thead>
             <tbody id="urlTbody">
-              <tr><td colspan="6" class="text-center text-muted py-4">Loading...</td></tr>
+              <tr><td colspan="7" class="text-center text-muted py-4">Loading...</td></tr>
             </tbody>
           </table>
         </div>
@@ -575,30 +576,65 @@ async function loadSummary() {
 }
 
 // ─── URLs ────────────────────────────────────────────────────────
+let _urlsSortKey = null, _urlsSortAsc = true;
+
+function sortUrls(key) {
+  if (_urlsSortKey === key) _urlsSortAsc = !_urlsSortAsc; else { _urlsSortKey = key; _urlsSortAsc = true; }
+  loadUrls();
+}
+
+function _sortUrls(urls) {
+  if (!_urlsSortKey) return urls;
+  return [...urls].sort((a, b) => {
+    let va, vb;
+    switch (_urlsSortKey) {
+      case 'url': va = a.url; vb = b.url; break;
+      case 'label': va = (a.labels||[]).join(',') || a.label || ''; vb = (b.labels||[]).join(',') || b.label || ''; break;
+      case 'crawl': va = a.deep_crawl ? 1 : 0; vb = b.deep_crawl ? 1 : 0; break;
+      case 'status': va = a.status; vb = b.status; break;
+      case 'chunks': va = a.chunk_count || 0; vb = b.chunk_count || 0; break;
+      case 'added': va = a.created_at || ''; vb = b.created_at || ''; break;
+      default: return 0;
+    }
+    if (typeof va === 'number') return _urlsSortAsc ? va - vb : vb - va;
+    return _urlsSortAsc ? String(va).localeCompare(String(vb)) : String(vb).localeCompare(String(va));
+  });
+}
+
+function _fmtDate(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  return d.toLocaleDateString('en-GB', {day:'2-digit',month:'short',year:'numeric'}) + ' ' + d.toLocaleTimeString('en-GB', {hour:'2-digit',minute:'2-digit'});
+}
+
 async function loadUrls() {
-  loadLabels();  // keep chip autocomplete in sync
+  loadLabels();
   const tb = document.getElementById('urlTbody');
   try {
-    const urls = await (await fetch('/urls')).json();
-    if (!urls.length) { tb.innerHTML = '<tr><td colspan="6" style="text-align:center;opacity:0.4">No URLs yet. Add one above.</td></tr>'; return; }
+    const raw = await (await fetch('/urls')).json();
+    const urls = _sortUrls(raw);
+    if (!urls.length) { tb.innerHTML = '<tr><td colspan="7" style="text-align:center;opacity:0.4">No URLs yet. Add one above.</td></tr>'; return; }
     tb.innerHTML = urls.map(u => {
       const dc = u.deep_crawl ? `🔍 depth ${u.deep_crawl_max_depth || 3}` : '·';
       const patInfo = [u.deep_crawl_url_pattern, u.deep_crawl_exclude_pattern].filter(Boolean).join(' / ') || '';
       const labelsArr = (u.labels && u.labels.length) ? u.labels : (u.label ? [u.label] : []);
       const labelsText = labelsArr.length ? labelsArr.join(', ') : '—';
+      const isAuto = u.parent_url_id != null;
+      const urlDisplay = isAuto ? '↳ ' + u.url : u.url;
       return `<tr>
-        <td><span class="url-col" title="${esc(u.url)}${patInfo?' — incl:'+esc(u.deep_crawl_url_pattern||'')+' excl:'+esc(u.deep_crawl_exclude_pattern||''):''}">${esc(trunc(u.url, 35))}</span></td>
+        <td style="max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(u.url)}${patInfo?' — incl:'+esc(u.deep_crawl_url_pattern||'')+' excl:'+esc(u.deep_crawl_exclude_pattern||''):''}">${esc(urlDisplay)}</td>
         <td title="${esc(labelsText)}">${esc(trunc(labelsText, 30))}</td>
         <td style="font-size:0.72rem;max-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(patInfo)}">${dc}${patInfo?`<br><span style="opacity:0.5">${esc(trunc(patInfo,20))}</span>`:''}</td>
         <td><span class="badge badge-${u.status}">${u.status}</span></td>
         <td>${u.chunk_count ?? 0}</td>
+        <td style="font-size:0.75rem;white-space:nowrap">${_fmtDate(u.created_at)}</td>
         <td>
           <button class="btn-icon border border-gray-600 text-gray-300 hover:bg-gray-700 rounded transition-colors" onclick='startEdit(${u.id},"${esc(u.url)}","${esc(labelsText)}",${u.deep_crawl||0},${u.deep_crawl_max_depth||3},"${esc(u.deep_crawl_url_pattern||'')}","${esc(u.deep_crawl_exclude_pattern||'')}")' title="Edit">✏️</button>
           <button class="btn-icon border border-gray-600 text-red-400 hover:bg-red-900/30 rounded transition-colors" onclick="removeUrl(${u.id})" title="Delete">🗑</button>
         </td>
       </tr>`;
     }).join('');
-  } catch(e) { tb.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#f87171">Failed to load</td></tr>'; }
+  } catch(e) { tb.innerHTML = '<tr><td colspan="7" style="text-align:center;color:#f87171">Failed to load</td></tr>'; }
 }
 
 function _splitLabels(s) {
