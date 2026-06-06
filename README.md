@@ -1,17 +1,20 @@
 # Internal Doc Search 🔍
 
-Semantic search for internal technical documentation. Crawls JS-heavy SPA doc sites, chunks with overlap, embeds with a QA-tuned model, stores in Qdrant, and serves results via a FastAPI with two-stage retrieval (bi-encoder recall → cross-encoder rerank → sigmoid normalization).
+Semantic search for internal technical documentation. Crawls JS-heavy SPA doc sites, chunks with token-aware boundaries, enriches with structural metadata, embeds with a QA-tuned model, stores in Qdrant, and serves results via a FastAPI with two-stage retrieval (bi-encoder recall → cross-encoder rerank → sigmoid normalization) plus source diversity.
 
-Also exposes an **MCP endpoint** so Claude Code, Claude Desktop, Codex, and other LLM agents can search docs, discover topics, add URLs, and trigger crawling directly.
+Also exposes an **MCP endpoint** with 6 tools so Claude Code, Claude Desktop, Codex, and other LLM agents can search docs, discover topics, explore surrounding context, add URLs, and trigger crawling directly.
 
 ## Architecture
 
 ```
 JS SPA Docs → Crawl4AI (Playwright) → fit_markdown (main content extraction)
-    → Chunk (2000 chars, 100 overlap) → multi-qa-mpnet-base-cos-v1 (768d)
-    → Qdrant → FastAPI /search → Cross-encoder rerank → Low-CE hints
+    → Metadata extraction (page title, section headings, content type)
+    → Chunk (400 tokens, 80-token overlap, paragraph boundaries, tiktoken-cl100k)
+    → multi-qa-mpnet-base-cos-v1 (768d) → Qdrant
+    → FastAPI /search → Cross-encoder rerank → Source diversity → Low-CE hints
 
-LLM/Agent → MCP /mcp/ → list_labels() / search_docs() / add_url_to_crawl() / trigger_crawl()
+LLM/Agent → MCP /mcp/ → list_labels() / search_docs() / get_chunks_for_url() /
+    get_adjacent_chunks() / add_url_to_crawl() / trigger_crawl()
 ```
 
 ## Quick Start
@@ -102,7 +105,9 @@ The server exposes an **MCP (Model Context Protocol)** endpoint at `/mcp/`. LLM 
 | Tool | Description |
 |------|-------------|
 | `list_labels()` | **Call first** — discover available topics/languages with chunk counts |
-| `search_docs(query, limit, labels)` | Semantic search with full-chunk content, cross-encoder rerank, multi-label filter, low-CE hints |
+| `search_docs(query, limit, labels, label_match_mode)` | Semantic search with full-chunk content, enriched metadata (page title, section heading, content type), cross-encoder rerank, multi-label filter, boost mode, source diversity, low-CE hints |
+| `get_chunks_for_url(url, limit, offset)` | Fetch all chunks from a URL (paginated) — explore full document context after a promising search hit |
+| `get_adjacent_chunks(url, chunk_index, page_index, window)` | Fetch surrounding chunks — see what comes before/after a specific chunk |
 | `add_url_to_crawl(url, labels, deep_crawl, depth, patterns)` | Add documentation URL with multi-label and deep crawl config |
 | `trigger_crawl(mode)` | Start background crawl: `"all"` recrawls everything, `"new"` only pending/failed |
 
@@ -201,19 +206,22 @@ curl -s -X POST http://localhost:8000/mcp/ \
 | `DELETE` | `/urls/{id}` | Remove crawl URL + cleanup Qdrant vectors |
 | `GET` | `/config` | Get all configuration values |
 | `PUT` | `/config` | Update configuration (chunk size, overlap, search limit, rerank pool, label match mode, boost weight) |
-| `MCP` | `/mcp/` | **MCP endpoint** — `list_labels`, `search_docs`, `add_url_to_crawl`, `trigger_crawl` |
+| `MCP` | `/mcp/` | **MCP endpoint** — 6 tools: `list_labels`, `search_docs`, `get_chunks_for_url`, `get_adjacent_chunks`, `add_url_to_crawl`, `trigger_crawl` |
 
 ## Configuration
 
 | Key | Default | Range | Description |
 |-----|---------|-------|-------------|
-| `chunk_max_chars` | 2000 | 500–5000 | Max characters per chunk |
-| `chunk_overlap` | 100 | 0–500 | Overlap between consecutive chunks |
+| `chunk_max_tokens` | 400 | 100–2000 | Max tokens per chunk (tiktoken cl100k_base) |
+| `chunk_overlap_tokens` | 80 | 0–500 | Token overlap between consecutive chunks |
+| `chunk_max_chars` | 2000 | — | **Deprecated** — use `chunk_max_tokens` instead |
+| `chunk_overlap` | 100 | — | **Deprecated** — use `chunk_overlap_tokens` instead |
 | `search_limit` | 7 | 1–20 | Number of results returned |
 | `rerank_candidates` | 50 | 10–200 | Candidates fetched from Qdrant for reranking |
 | `label_match_mode` | `hard` | `hard` \| `boost` | `hard` = pre-filter by label, `boost` = score-blend off-label docs |
 | `label_boost_weight` | 0.3 | 0–1 | Label-match score weight in boost mode |
 | `min_ce_threshold` | 0.0 | 0–1 | Minimum cross-encoder score — results below this are filtered out |
+| `source_diversity_cap` | 2 | 0–10 | Max chunks per URL in results (0 = unlimited) |
 
 All configurable via the dashboard UI or `PUT /config`.
 
@@ -248,12 +256,12 @@ python -m pytest tests/test_store.py::test_add_url -v
 ```
 internal-doc-search/
 ├── api.py              # FastAPI server (15 endpoints)
-├── mcp_server.py       # MCP server (4 LLM agent tools)
-├── label_resolver.py   # Label parsing, Qdrant filter building, score blending
-├── ingest.py           # Crawl → chunk → embed → store pipeline
+├── mcp_server.py       # MCP server (6 LLM agent tools)
+├── search_utils.py     # Shared search logic — label parsing, filter building, result normalization, boost blending, source diversity, hints (used by both API + MCP)
+├── ingest.py           # Crawl → metadata extract → chunk → embed → store pipeline
 ├── store.py            # SQLite config store (URLs, crawl history, app config, url_labels)
-├── chunker.py          # Text chunking (paragraph-aware, configurable overlap)
-├── requirements.txt    # Python dependencies
+├── chunker.py          # Token-aware text chunking (tiktoken, paragraph-preserving, section heading metadata)
+├── requirements.txt    # Python dependencies (includes tiktoken)
 ├── docker-compose.yml  # Qdrant + API services (shm_size: 2gb)
 ├── Dockerfile          # Multi-stage: browsers + app + Playwright cache volume
 ├── entrypoint.sh       # Container entrypoint

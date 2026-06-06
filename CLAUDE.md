@@ -31,19 +31,21 @@ python ingest.py
 
 ## Architecture
 
-**Pipeline**: Crawl4AI (Playwright, JS SPA) → fit_markdown (extracts main content, strips nav/footer/sidebar) → chunk (2000 chars configurable, 100 overlap, paragraph boundaries) → multi-qa-mpnet-base-cos-v1 (768d) → Qdrant (COSINE) → FastAPI `/search` (bi-encoder recall → cross-encoder/ms-marco-MiniLM-L-6-v2 rerank → sigmoid normalization to 0-1) → low-relevance `_hint` when best CE < 0.3
+**Pipeline**: Crawl4AI (Playwright, JS SPA) → fit_markdown (extracts main content, strips nav/footer/sidebar) → metadata extraction (page title, section headings, content type) → token-aware chunk (400 tokens default, 80-token overlap, paragraph boundaries, tiktoken cl100k_base) → multi-qa-mpnet-base-cos-v1 (768d) → Qdrant (COSINE) → FastAPI `/search` (bi-encoder recall → cross-encoder/ms-marco-MiniLM-L-6-v2 rerank → sigmoid normalization to 0-1 → source diversity cap → min-CE threshold) → low-relevance `_hint` when best CE < 0.3
 
 **Two databases, different roles:**
 - **SQLite** (`data/config.db`, WAL mode): configuration store — URLs to crawl, crawl history, app config (chunk size, overlap, search limit, rerank pool, label match mode, boost weight, min CE threshold). Accessed via `store.py` functions only. Multi-label URLs stored in `url_labels` linking table.
-- **Qdrant** (`qdrant_data/`): vector embeddings + payload (`url`, `label`, `chunk_index`, `page_index`, `content`). Collection: `internal_docs`. Each chunk is replicated once per label so any single label filter matches.
+- **Qdrant** (`qdrant_data/`): vector embeddings + payload (`url`, `label`, `chunk_index`, `page_index`, `content`, `page_title`, `section_heading`, `content_type`, `total_chunks`). Collection: `internal_docs`. Each chunk is replicated once per label so any single label filter matches.
 
-**MCP endpoint** (`/mcp/` — trailing slash required): Exposes 4 tools for LLM agents — `list_labels`, `search_docs`, `add_url_to_crawl`, `trigger_crawl`. Uses FastMCP 3.x (`http_app(path="/")` + manual nested `async with` lifespan). Mount is at `/mcp` with sub-app route at `/`; Starlette strips `/mcp/` prefix leaving `/` which matches. The trailing slash is needed because stripping `/mcp` leaves `""` which doesn't match `/`. Static files mount at `/static` (NOT `/`) to avoid the `/` mount from intercepting `/mcp` routes. Dashboard served at `/` via `FileResponse`.
+**MCP endpoint** (`/mcp/` — trailing slash required): Exposes 6 tools for LLM agents — `list_labels`, `search_docs`, `get_chunks_for_url`, `get_adjacent_chunks`, `add_url_to_crawl`, `trigger_crawl`. Uses FastMCP 3.x (`http_app(path="/")` + manual nested `async with` lifespan). Mount is at `/mcp` with sub-app route at `/`; Starlette strips `/mcp/` prefix leaving `/` which matches. The trailing slash is needed because stripping `/mcp` leaves `""` which doesn't match `/`. Static files mount at `/static` (NOT `/`) to avoid the `/` mount from intercepting `/mcp` routes. Dashboard served at `/` via `FileResponse`.
 
-**Four MCP tools:**
+**Six MCP tools:**
 | Tool | Purpose |
 |---|---|
 | `list_labels()` | Discover available topics/languages — call first before `search_docs` |
-| `search_docs(query, limit, labels)` | Two-stage retrieval with multi-label filter and low-relevance hint |
+| `search_docs(query, limit, labels, label_match_mode)` | Two-stage retrieval with multi-label filter, boost mode, source diversity, enriched metadata, and low-relevance hint |
+| `get_chunks_for_url(url, limit, offset)` | Fetch all chunks from a URL (paginated) — explore full document context |
+| `get_adjacent_chunks(url, chunk_index, page_index, window)` | Fetch surrounding chunks — context exploration around a result |
 | `add_url_to_crawl(url, labels, deep_crawl, ...)` | Add URL with multi-label support and deep crawl config |
 | `trigger_crawl(mode)` | Start crawl: `mode="all"` recrawls everything, `mode="new"` only pending/failed |
 
@@ -62,6 +64,14 @@ python ingest.py
 - `mode=new`: Only crawl URLs with status "pending" or "failed", skip "completed"
 
 **Search filter**: The `/search` endpoint accepts repeated `label` query params for multi-label OR filter, with `-` prefix for exclusion. `label_match_mode` accepts `hard` or `boost`. Configurable via `/config`.
+
+**Shared search module** (`search_utils.py`): Single source of truth for search logic used by both `api.py` and `mcp_server.py`. Contains `parse_labels()`, `build_filter()`, `apply_label_boost()`, `normalize_results()`, `apply_min_ce_threshold()`, `apply_source_diversity()`, `generate_low_relevance_hint()`, and `_build_result()`. Result fields are defined once in `RESULT_PAYLOAD_MAP` — add new metadata fields there and both API + MCP pick them up automatically.
+
+**Token-aware chunking**: Uses `tiktoken` with `cl100k_base` encoding (same as bi-encoder's tokenizer) to count tokens, not characters. Default `chunk_max_tokens=400` (fits within 512-token model limit with headroom) and `chunk_overlap_tokens=80` (20%). Old `chunk_max_chars`/`chunk_overlap` config keys are deprecated but still read as fallback.
+
+**Enriched chunk metadata**: During crawl, each page's `# ` heading is extracted as `page_title`, nearest `##`/`###` heading per chunk as `section_heading`, and URL+content heuristics classify `content_type` (`api-reference`, `conceptual`, `tutorial`, `reference`, `changelog`, `unknown`). All stored in Qdrant payload and surfaced in search results.
+
+**Source diversity**: After reranking, max N chunks per URL (config `source_diversity_cap`, default 2). Prevents single-source dominance in results — vacated slots filled from other URLs. Cap of 0 = unlimited.
 
 **Model caching**: `HF_HOME=/app/.cache/huggingface` in container, volume-mounted at `./.cache` on host. Models load once, survive rebuilds.
 
@@ -84,7 +94,7 @@ Or add globally: `claude mcp add --scope user --transport http doc-search http:/
 
 **min_ce_threshold** config (default 0.0, range 0–1): Filters results whose cross-encoder score falls below the threshold. Applied in both hard and boost label modes.
 
-**MCP full content**: Unlike earlier versions that truncated `content` to 500 chars (causing mid-sentence cutoffs), `search_docs` now returns the complete chunk content (up to `chunk_max_chars`, default 2000). The API `/search` endpoint also returns full content.
+**MCP full content**: `search_docs` returns the complete chunk content (up to `chunk_max_tokens` = 400 tokens, ~1500 chars). No truncation. Enriched metadata — `page_title`, `section_heading`, `content_type`, `total_chunks` — included in every result. The API `/search` endpoint also returns full content with metadata.
 
 **Dashboard UI**: Tailwind CSS (Play CDN) with dark theme. Sections: stats bar (4-cards), search with label chips, URLs table, config form, API endpoint reference, MCP setup guide. Mobile responsive (stacks to single column). See `static/index.html`.
 
