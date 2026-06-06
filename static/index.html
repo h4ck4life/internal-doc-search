@@ -612,10 +612,11 @@ function _renderUrlRow(u, isChild) {
   const patInfo = [u.deep_crawl_url_pattern, u.deep_crawl_exclude_pattern].filter(Boolean).join(' / ') || '';
   const labelsArr = (u.labels && u.labels.length) ? u.labels : (u.label ? [u.label] : []);
   const labelsText = labelsArr.length ? labelsArr.join(', ') : '—';
-  const urlDisplay = isChild ? '↳ ' + u.url : u.url;
+  const prefix = isChild ? '↳ ' : '';
+  const btnHtml = u._expandBtn || '';
   const rowCls = isChild ? `child-row child-of-${u.parent_url_id} hidden` : '';
   return `<tr class="${rowCls}">
-    <td style="max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(u.url)}">${esc(urlDisplay)}</td>
+    <td style="max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(u.url)}">${btnHtml}${esc(prefix + u.url)}</td>
     <td title="${esc(labelsText)}">${esc(trunc(labelsText, 30))}</td>
     <td style="font-size:0.72rem;max-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(patInfo)}">${dc}${patInfo?`<br><span style="opacity:0.5">${esc(trunc(patInfo,20))}</span>`:''}</td>
     <td><span class="badge badge-${u.status}">${u.status}</span></td>
@@ -656,7 +657,7 @@ async function loadUrls() {
     parents.forEach(u => {
       const n = childCount[u.id] || 0;
       const expandBtn = n > 0 ? `<button class="text-xs mr-1" onclick="toggleChildren(${u.id}, this)" title="Show/hide ${n} discovered pages" style="background:none;border:1px solid #30363d;border-radius:4px;color:#8b949e;cursor:pointer;padding:0 3px">▶</button>` : '';
-      html += _renderUrlRow({...u, url: expandBtn + u.url}, false);
+      html += _renderUrlRow({...u, url: u.url, _expandBtn: expandBtn}, false);
     });
     children.forEach(u => html += _renderUrlRow(u, true));
 
