@@ -114,7 +114,7 @@ The server exposes an **MCP (Model Context Protocol)** endpoint at `/mcp/`. LLM 
 {
   "mcpServers": {
     "doc-search": {
-      "type": "url",
+      "type": "http",
       "url": "http://localhost:8000/mcp/"
     }
   }
@@ -134,7 +134,7 @@ Settings → Developer → MCP Servers → Add:
 ```json
 {
   "doc-search": {
-    "type": "url",
+    "type": "http",
     "url": "http://localhost:8000/mcp/"
   }
 }

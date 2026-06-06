@@ -67,7 +67,7 @@ python ingest.py
 
 **MCP config — project `.mcp.json`** (auto-connects Claude Code):
 ```json
-{"mcpServers": {"doc-search": {"type": "url", "url": "http://localhost:8000/mcp/"}}}
+{"mcpServers": {"doc-search": {"type": "http", "url": "http://localhost:8000/mcp/"}}}
 ```
 Or add globally: `claude mcp add --transport http doc-search http://localhost:8000/mcp/`
 
