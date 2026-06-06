@@ -91,7 +91,7 @@ def _normalize_scores(results, ce_scores, limit: int) -> list[dict]:
             "url": point.payload.get("url"),
             "label": point.payload.get("label", ""),
             "chunk_index": point.payload.get("chunk_index"),
-            "content": content[:500],
+            "content": content,
         })
     combined.sort(key=lambda x: x["cross_encoder_score"], reverse=True)
     return combined[:limit]
