@@ -365,5 +365,15 @@ async def run_ingest(on_progress=None, only_pending: bool = False) -> Dict:
 
 
 if __name__ == "__main__":
-    result = asyncio.run(run_ingest())
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Run ingestion pipeline")
+    parser.add_argument(
+        "--mode", choices=("all", "new"), default="all",
+        help="all = recrawl everything; new = only pending/failed (default: all)",
+    )
+    args = parser.parse_args()
+
+    only_pending = (args.mode == "new")
+    result = asyncio.run(run_ingest(only_pending=only_pending))
     print(f"\nIngest complete: {result}")

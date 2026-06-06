@@ -444,21 +444,28 @@ def test_delete_nonexistent_url(client):
 
 
 def test_ingest_endpoint_returns_started(client):
-    """POST /ingest returns {status, total_urls} and triggers run_ingest."""
-    with patch("api._background_ingest") as mock_bg:
+    """POST /ingest spawns subprocess and returns {status, total_urls, pid}."""
+    with patch("api.subprocess.Popen") as mock_popen:
+        mock_popen.return_value.poll.return_value = None  # still running
+        mock_popen.return_value.pid = 12345
         response = client.post("/ingest")
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "started"
         assert "total_urls" in data
+        assert "pid" in data
 
 
 def test_ingest_already_running_returns_409(client):
     """POST /ingest while a crawl is in progress returns 409."""
     import api as api_module
-    api_module._ingest_state["running"] = True
-    try:
-        response = client.post("/ingest")
-        assert response.status_code == 409
-    finally:
-        api_module._ingest_state["running"] = False
+    # Simulate a running subprocess
+    old_process = api_module._ingest_process
+    with patch("api.subprocess.Popen") as mock_popen:
+        mock_popen.return_value.poll.return_value = None  # still running
+        api_module._ingest_process = mock_popen.return_value
+        try:
+            response = client.post("/ingest")
+            assert response.status_code == 409
+        finally:
+            api_module._ingest_process = old_process

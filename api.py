@@ -35,16 +35,11 @@ QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
 bi_encoder: Optional[SentenceTransformer] = None
 cross_encoder: Optional[CrossEncoder] = None
 
-# Background ingest state
-_ingest_state = {
-    "running": False,
-    "status": "idle",  # idle | running | completed | failed
-    "total_urls": 0,
-    "current_url": 0,
-    "current_label": "",
-    "chunks_stored": 0,
-    "message": "",
-}
+import subprocess
+import sys
+
+# Track the subprocess.Popen reference so we can check if still running
+_ingest_process = None
 
 
 def _load_models() -> None:
@@ -107,40 +102,6 @@ class URLUpdate(BaseModel):
     deep_crawl_max_depth: Optional[int] = None
     deep_crawl_url_pattern: Optional[str] = None
     deep_crawl_exclude_pattern: Optional[str] = None
-
-
-# ─── Background ingest worker ────────────────────────────────────
-
-
-async def _background_ingest(mode: str = "all"):
-    """Run ingest in background, updating _ingest_state as it progresses.
-
-    Args:
-        mode: "all" — recrawl every URL (reset completed → pending first).
-              "new" — only crawl pending/failed URLs, skip completed.
-    """
-    global _ingest_state
-    try:
-        from ingest import run_ingest
-
-        async def on_progress(current: int, total: int, label: str, chunks: int):
-            _ingest_state.update({
-                "current_url": current,
-                "total_urls": total,
-                "current_label": label,
-                "chunks_stored": chunks,
-                "message": f"{current}/{total} — {label}",
-            })
-
-        result = await run_ingest(on_progress=on_progress, only_pending=(mode == "new"))
-        _ingest_state["status"] = "completed"
-        _ingest_state["message"] = f"{result['urls_crawled']} URLs, {result['chunks_stored']} chunks"
-        _ingest_state["current_url"] = _ingest_state["total_urls"]
-    except Exception as e:
-        _ingest_state["status"] = "failed"
-        _ingest_state["message"] = str(e)
-    finally:
-        _ingest_state["running"] = False
 
 
 # ─── Endpoints ───────────────────────────────────────────────────
@@ -257,15 +218,15 @@ async def health():
 
 @app.post("/ingest")
 async def ingest(mode: str = Query(default="all", pattern="^(all|new)$")):
-    """Start background crawl. Returns immediately with current state URL.
+    """Start ingest as a separate subprocess. Returns immediately.
 
-    Modes:
-      - all (default): reset all URLs to pending, then crawl everything
-      - new: only crawl pending/failed URLs, skip already-crawled
+    Ingestion runs in its own Python process — does not block the API.
+    Homepage polls /ingest/status which reads URL statuses from the DB.
     """
-    global _ingest_state
+    global _ingest_process
 
-    if _ingest_state["running"]:
+    # Check if subprocess is still alive
+    if _ingest_process is not None and _ingest_process.poll() is None:
         raise HTTPException(status_code=409, detail={"status": "already_running"})
 
     from store import list_urls as _urls, update_url_status as _update_status
@@ -276,30 +237,61 @@ async def ingest(mode: str = Query(default="all", pattern="^(all|new)$")):
         if not pending:
             return {"status": "no_urls", "message": "No pending or failed URLs to crawl. Use mode=all to recrawl completed URLs."}
     else:
-        # mode=all: reset all completed/failed URLs to pending before crawling
         pending = [u for u in url_list if u["status"] != "crawling"]
         for u in url_list:
             if u["status"] in ("completed", "failed"):
                 _update_status(u["id"], "pending")
 
-    _ingest_state = {
-        "running": True,
-        "status": "running",
-        "total_urls": len(pending),
-        "current_url": 0,
-        "current_label": "",
-        "chunks_stored": 0,
-        "message": "Crawl started",
-    }
+    # Spawn ingest.py as a separate process
+    python = sys.executable
+    _ingest_process = subprocess.Popen(
+        [python, "ingest.py", "--mode", mode],
+        cwd=os.path.dirname(os.path.abspath(__file__)),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
 
-    asyncio.create_task(_background_ingest(mode=mode))
-    return {"status": "started", "mode": mode, "total_urls": len(pending)}
+    return {
+        "status": "started",
+        "mode": mode,
+        "total_urls": len(pending),
+        "pid": _ingest_process.pid,
+    }
 
 
 @app.get("/ingest/status")
 async def ingest_status():
-    """Return current crawler state."""
-    return _ingest_state
+    """Return crawl progress by reading URL statuses from the database."""
+    global _ingest_process
+
+    from store import list_urls as _urls
+    urls = _urls()
+
+    total = len(urls)
+    completed = sum(1 for u in urls if u["status"] == "completed")
+    failed = sum(1 for u in urls if u["status"] == "failed")
+    pending_count = sum(1 for u in urls if u["status"] == "pending")
+    crawling_count = sum(1 for u in urls if u["status"] == "crawling")
+    total_chunks = sum(u.get("chunk_count", 0) or 0 for u in urls)
+
+    # Determine if a crawl is running
+    running = _ingest_process is not None and _ingest_process.poll() is None
+    if not running:
+        _ingest_process = None  # cleanup
+
+    status = "running" if running else ("complete" if completed > 0 else "idle")
+
+    return {
+        "running": running,
+        "status": status,
+        "total_urls": total,
+        "completed": completed,
+        "failed": failed,
+        "pending": pending_count,
+        "crawling": crawling_count,
+        "chunks_stored": total_chunks,
+        "message": f"{completed}/{total} completed" if total > 0 else "No URLs configured",
+    }
 
 
 @app.get("/docs-summary")

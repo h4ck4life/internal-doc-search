@@ -451,13 +451,15 @@ async def trigger_crawl(mode: str = "all") -> dict:
     Returns:
         Status indicating crawl has started, or error if already running
     """
+    import os as _os, sys as _sys, subprocess as _sp
+
     _ensure_imports()
-    from api import _ingest_state, _background_ingest
+    from api import _ingest_process
 
     if mode not in ("all", "new"):
         return {"error": f"mode must be 'all' or 'new', got {mode!r}"}
 
-    if _ingest_state["running"]:
+    if _ingest_process is not None and _ingest_process.poll() is None:
         return {"status": "already_running", "message": "A crawl is already in progress"}
 
     from store import list_urls as _urls, update_url_status as _update_status
@@ -473,15 +475,19 @@ async def trigger_crawl(mode: str = "all") -> dict:
             if u["status"] in ("completed", "failed"):
                 _update_status(u["id"], "pending")
 
-    _ingest_state.update({
-        "running": True,
-        "status": "running",
-        "total_urls": len(pending),
-        "current_url": 0,
-        "current_label": "",
-        "chunks_stored": 0,
-        "message": f"Crawl started ({mode} mode)",
-    })
+    # Spawn ingest.py as a separate process (non-blocking)
+    python = _sys.executable
+    _ingest_process = _sp.Popen(
+        [python, "ingest.py", "--mode", mode],
+        cwd=_os.path.dirname(_os.path.abspath(__file__)),
+        stdout=_sp.PIPE,
+        stderr=_sp.STDOUT,
+    )
 
-    asyncio.create_task(_background_ingest(mode=mode))
-    return {"status": "started", "mode": mode, "total_urls": len(pending), "message": f"Crawling {len(pending)} URL(s) in background (mode={mode})"}
+    return {
+        "status": "started",
+        "mode": mode,
+        "total_urls": len(pending),
+        "pid": _ingest_process.pid,
+        "message": f"Crawling {len(pending)} URL(s) in separate process (mode={mode})",
+    }
