@@ -242,16 +242,31 @@ async def health():
 
 
 @app.post("/ingest")
-async def ingest():
-    """Start background crawl. Returns immediately with current state URL."""
+async def ingest(mode: str = Query(default="all", pattern="^(all|new)$")):
+    """Start background crawl. Returns immediately with current state URL.
+
+    Modes:
+      - all (default): reset all URLs to pending, then crawl everything
+      - new: only crawl pending/failed URLs, skip already-crawled
+    """
     global _ingest_state
 
     if _ingest_state["running"]:
         raise HTTPException(status_code=409, detail={"status": "already_running"})
 
-    from store import list_urls as _urls
+    from store import list_urls as _urls, update_url_status as _update_status
     url_list = _urls()
-    pending = [u for u in url_list if u["status"] != "crawling"]
+
+    if mode == "new":
+        pending = [u for u in url_list if u["status"] in ("pending", "failed")]
+        if not pending:
+            return {"status": "no_urls", "message": "No pending or failed URLs to crawl. Use mode=all to recrawl completed URLs."}
+    else:
+        # mode=all: reset all completed/failed URLs to pending before crawling
+        pending = [u for u in url_list if u["status"] != "crawling"]
+        for u in url_list:
+            if u["status"] in ("completed", "failed"):
+                _update_status(u["id"], "pending")
 
     _ingest_state = {
         "running": True,
@@ -263,8 +278,8 @@ async def ingest():
         "message": "Crawl started",
     }
 
-    asyncio.create_task(_background_ingest())
-    return {"status": "started", "total_urls": len(pending)}
+    asyncio.create_task(_background_ingest(mode=mode))
+    return {"status": "started", "mode": mode, "total_urls": len(pending)}
 
 
 @app.get("/ingest/status")

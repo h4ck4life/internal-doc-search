@@ -293,11 +293,15 @@ async def add_url_to_crawl(
 
 
 @mcp.tool()
-async def trigger_crawl() -> dict:
-    """Start a background crawl of all configured URLs.
+async def trigger_crawl(mode: str = "all") -> dict:
+    """Start a background crawl of configured URLs.
 
     Crawling happens asynchronously — this returns immediately.
     Use the /ingest/status endpoint in the web UI to track progress.
+
+    Args:
+        mode: "all" (default) — recrawl every URL, resetting completed ones to pending.
+              "new" — only crawl pending/failed URLs, skip already-crawled.
 
     Returns:
         Status indicating crawl has started, or error if already running
@@ -305,14 +309,24 @@ async def trigger_crawl() -> dict:
     _ensure_imports()
     from api import _ingest_state, _background_ingest
 
+    if mode not in ("all", "new"):
+        return {"error": f"mode must be 'all' or 'new', got {mode!r}"}
+
     if _ingest_state["running"]:
         return {"status": "already_running", "message": "A crawl is already in progress"}
 
-    from store import list_urls as _urls
+    from store import list_urls as _urls, update_url_status as _update_status
     url_list = _urls()
-    pending = [u for u in url_list if u["status"] != "crawling"]
-    if not pending:
-        return {"status": "no_urls", "message": "No URLs configured. Use add_url_to_crawl first."}
+
+    if mode == "new":
+        pending = [u for u in url_list if u["status"] in ("pending", "failed")]
+        if not pending:
+            return {"status": "no_urls", "message": "No pending or failed URLs to crawl. Use mode='all' to recrawl completed URLs."}
+    else:
+        pending = [u for u in url_list if u["status"] != "crawling"]
+        for u in url_list:
+            if u["status"] in ("completed", "failed"):
+                _update_status(u["id"], "pending")
 
     _ingest_state.update({
         "running": True,
@@ -321,8 +335,8 @@ async def trigger_crawl() -> dict:
         "current_url": 0,
         "current_label": "",
         "chunks_stored": 0,
-        "message": "Crawl started",
+        "message": f"Crawl started ({mode} mode)",
     })
 
-    asyncio.create_task(_background_ingest())
-    return {"status": "started", "total_urls": len(pending), "message": f"Crawling {len(pending)} URL(s) in background"}
+    asyncio.create_task(_background_ingest(mode=mode))
+    return {"status": "started", "mode": mode, "total_urls": len(pending), "message": f"Crawling {len(pending)} URL(s) in background (mode={mode})"}

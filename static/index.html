@@ -97,7 +97,8 @@
       <h1>🔍 Internal Doc Search</h1>
       <p style="margin:0;opacity:0.5">Semantic search for your documentation</p>
     </hgroup>
-    <button id="crawlBtn" onclick="triggerCrawl()">🔄 Re-Crawl All</button>
+    <button id="crawlBtnAll" onclick="triggerCrawl('all')" class="secondary">🔄 Recrawl All</button>
+    <button id="crawlBtnNew" onclick="triggerCrawl('new')">🆕 Recrawl New</button>
   </div>
 
   <div id="crawlMsg" class="status-msg hidden"></div>
@@ -260,33 +261,46 @@
 </main>
 
 <script>
-let searchLimit = 7, pollTimer = null;
-addEventListener('DOMContentLoaded', () => { loadSummary(); loadUrls(); loadConfig(); loadLabels(); });
+let searchLimit = 7, pollTimer = null, knownLabels = [];
+addEventListener('DOMContentLoaded', () => { loadSummary(); loadUrls(); loadConfig(); loadLabels(); initChipInput(); });
 
 async function loadLabels() {
   try {
-    const labels = await (await fetch('/labels')).json();
-    const sel = document.getElementById('searchLabel');
-    sel.innerHTML = '<option value="">All sources</option>' + labels.map(l => `<option value="${esc(l)}">${esc(l)}</option>`).join('');
+    const items = await (await fetch('/labels')).json();
+    knownLabels = items.map(l => l.label);
   } catch(e) { /* non-critical */ }
 }
 
 // ─── Crawl (background + polling) ────────────────────────────────
-async function triggerCrawl() {
-  const btn = document.getElementById('crawlBtn'), el = document.getElementById('crawlMsg');
-  btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Starting...'; el.classList.add('hidden');
+async function triggerCrawl(mode) {
+  const btnAll = document.getElementById('crawlBtnAll'), btnNew = document.getElementById('crawlBtnNew');
+  const el = document.getElementById('crawlMsg');
+  btnAll.disabled = true; btnAll.innerHTML = '<span class="spinner"></span> Starting...';
+  btnNew.disabled = true; btnNew.innerHTML = '<span class="spinner"></span> Starting...';
+  el.classList.add('hidden');
   try {
-    const r = await fetch('/ingest', { method: 'POST' });
+    const r = await fetch(`/ingest?mode=${mode}`, { method: 'POST' });
     const d = await r.json();
     if (r.status === 409) {
       el.innerHTML = '<mark style="background:#3b2f00;color:#facc15">⚠ Already running</mark>';
-      el.classList.remove('hidden'); btn.disabled = false; btn.innerHTML = '🔄 Re-Crawl All';
+      el.classList.remove('hidden');
+      resetCrawlBtns();
+    } else if (d.status === 'no_urls') {
+      el.innerHTML = `<mark style="background:#3b2f00;color:#facc15">⚠ ${d.message||'Nothing to crawl'}</mark>`;
+      el.classList.remove('hidden');
+      resetCrawlBtns();
     } else {
-      el.innerHTML = `<mark style="background:#1e3a5f;color:#6c8cff">⏳ Crawling ${d.total_urls} URL(s) in background…</mark>`;
+      el.innerHTML = `<mark style="background:#1e3a5f;color:#6c8cff">⏳ Crawling ${d.total_urls} URL(s) in background… (mode=${d.mode||'all'})</mark>`;
       el.classList.remove('hidden');
       startPolling();
     }
-  } catch(e) { el.innerHTML = `<mark style="background:#450a0a;color:#f87171">✗ ${e.message}</mark>`; el.classList.remove('hidden'); btn.disabled = false; btn.innerHTML = '🔄 Re-Crawl All'; }
+  } catch(e) { el.innerHTML = `<mark style="background:#450a0a;color:#f87171">✗ ${e.message}</mark>`; el.classList.remove('hidden'); resetCrawlBtns(); }
+}
+
+function resetCrawlBtns() {
+  const btnAll = document.getElementById('crawlBtnAll'), btnNew = document.getElementById('crawlBtnNew');
+  btnAll.disabled = false; btnAll.innerHTML = '🔄 Recrawl All';
+  btnNew.disabled = false; btnNew.innerHTML = '🆕 Recrawl New';
 }
 
 function startPolling() {
@@ -302,7 +316,7 @@ function startPolling() {
       document.getElementById('progressText').textContent = s.message || `${s.current_url}/${s.total_urls}`;
       if (!s.running) {
         clearInterval(pollTimer); pollTimer = null;
-        const btn = document.getElementById('crawlBtn'); btn.disabled = false; btn.innerHTML = '🔄 Re-Crawl All';
+        resetCrawlBtns();
         if (s.status === 'completed') {
           el.innerHTML = '<mark style="background:#14532d;color:#4ade80">✓ Done — ' + s.message + '</mark>';
         } else {
@@ -463,6 +477,8 @@ async function doSearch() {
   try {
     // Build label query params from chips: ?label=A&label=B&label=-X
     const params = new URLSearchParams({ q, limit: searchLimit });
+    const labelMode = document.getElementById('cfgLabelMatchMode')?.value;
+    if (labelMode) params.append('label_match_mode', labelMode);
     for (const sel of selectedLabels) {
       params.append('label', sel.neg ? `-${sel.label}` : sel.label);
     }
@@ -474,7 +490,7 @@ async function doSearch() {
       const finalScore = r.final_score != null ? `<span>· Final ${r.final_score.toFixed(3)}</span>` : '';
       return `<article class="result-card">
         <div class="result-meta">${labelBadge}<span>CE <strong class="${cls}">${ce.toFixed(3)}</strong></span><span>· Qdrant ${r.score.toFixed(3)}</span>${finalScore}<span>· Chunk #${r.chunk_index}</span></div>
-        <div class="result-content">${esc(r.content).substring(0,350)}${r.content.length>350?'…':''}</div>
+        <div class="result-content">${esc(r.content)}</div>
         <div class="result-url">🔗 <a href="${esc(r.url)}" target="_blank">${esc(r.url)}</a></div>
       </article>`;
     }).join('');

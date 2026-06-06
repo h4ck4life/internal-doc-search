@@ -116,16 +116,23 @@ async def _crawl_single_url(
             raise RuntimeError(result.error_message or "Unknown crawl error")
 
 
-async def run_ingest(on_progress=None) -> Dict:
+async def run_ingest(on_progress=None, only_pending: bool = False) -> Dict:
     """Run the full ingestion pipeline. Updates per-URL status in SQLite.
 
     Args:
         on_progress: Optional async callback(current, total, label, chunks_stored)
+        only_pending: If True, only crawl URLs with status "pending" or "failed"
+            (skip "completed"). Default False = crawl everything.
     """
     init_db()
     urls = list_urls()
     if not urls:
         return {"status": "completed", "urls_crawled": 0, "chunks_stored": 0, "message": "No URLs configured"}
+
+    if only_pending:
+        urls = [u for u in urls if u["status"] in ("pending", "failed")]
+        if not urls:
+            return {"status": "completed", "urls_crawled": 0, "chunks_stored": 0, "message": "No pending URLs — all already crawled"}
 
     model = _get_model()
     client = AsyncQdrantClient(url=QDRANT_URL, check_compatibility=False)
