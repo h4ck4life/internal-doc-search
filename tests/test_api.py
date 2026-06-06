@@ -444,28 +444,23 @@ def test_delete_nonexistent_url(client):
 
 
 def test_ingest_endpoint_returns_started(client):
-    """POST /ingest spawns subprocess and returns {status, total_urls, pid}."""
-    with patch("api.subprocess.Popen") as mock_popen:
-        mock_popen.return_value.poll.return_value = None  # still running
-        mock_popen.return_value.pid = 12345
+    """POST /ingest spawns background thread and returns {status, total_urls}."""
+    with patch("api.threading.Thread") as mock_thread:
         response = client.post("/ingest")
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "started"
         assert "total_urls" in data
-        assert "pid" in data
+        mock_thread.assert_called_once()
 
 
 def test_ingest_already_running_returns_409(client):
     """POST /ingest while a crawl is in progress returns 409."""
     import api as api_module
-    # Simulate a running subprocess
-    old_process = api_module._ingest_process
-    with patch("api.subprocess.Popen") as mock_popen:
-        mock_popen.return_value.poll.return_value = None  # still running
-        api_module._ingest_process = mock_popen.return_value
-        try:
-            response = client.post("/ingest")
-            assert response.status_code == 409
-        finally:
-            api_module._ingest_process = old_process
+    old_state = dict(api_module._ingest_state)
+    api_module._ingest_state["running"] = True
+    try:
+        response = client.post("/ingest")
+        assert response.status_code == 409
+    finally:
+        api_module._ingest_state.update(old_state)
