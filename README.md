@@ -114,6 +114,30 @@ The server exposes an **MCP (Model Context Protocol)** endpoint at `/mcp/`. LLM 
 | `add_url_to_crawl(url, labels, deep_crawl, depth, patterns)` | Add documentation URL with multi-label and deep crawl config. Auto-registers discovered pages during deep crawl |
 | `trigger_crawl(mode)` | Start background crawl in a dedicated thread (non-blocking): `"all"` recrawls everything, `"new"` only pending/failed |
 
+### Using from Claude Code / LLM Agents
+
+Just ask naturally — the LLM automatically calls the right tools:
+
+```
+use doc search, how does OAuth token refresh work?
+
+use doc search with label KWSP, cara semak baki akaun
+
+use doc search with label mcp, what is the transport layer?
+```
+
+With boost mode (cross-topic discovery):
+
+```
+use doc search with labels mcp and label_match_mode boost, how do AI agents work?
+```
+
+The LLM will:
+1. Call `list_labels()` if it needs to discover available topics
+2. Call `search_docs()` with your query + label filter
+3. Call `get_chunks_for_url()` or `get_adjacent_chunks()` to explore surrounding context
+4. Present results with cross-encoder scores, page titles, and section headings
+
 ### Configure in Claude Code
 
 **Option A — Project `.mcp.json`** (auto-connects when Claude Code opens this repo):

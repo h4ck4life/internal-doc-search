@@ -109,10 +109,10 @@ async def search_docs(
 ) -> dict:
     """Semantic search across crawled documentation with two-stage retrieval.
 
-    IMPORTANT — if results have low cross_encoder_score (< 0.3), the documents
-    may be in a different language than your query. Call list_labels() to see
-    what topics/languages are available, translate your query to match, and
-    search again with the appropriate labels filter.
+    CRITICAL — Always call list_labels() FIRST when the user's question is about a
+    specific topic. Search without labels returns low-relevance results. If results
+    include a _hint field, you MUST immediately re-search with one of the suggested
+    labels — the hint means the corpus may be in a different domain than your query.
 
     Tip: If the question is topic-specific, call list_labels() first, then pass
     the matching label(s) here to scope results.
