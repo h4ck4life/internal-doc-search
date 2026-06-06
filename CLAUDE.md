@@ -31,10 +31,10 @@ python ingest.py
 
 ## Architecture
 
-**Pipeline**: Crawl4AI (Playwright, JS SPA) → chunk (2000 chars configurable, 100 overlap, paragraph boundaries) → multi-qa-mpnet-base-cos-v1 (768d) → Qdrant (COSINE) → FastAPI `/search` (bi-encoder recall → cross-encoder/ms-marco-MiniLM-L-6-v2 rerank → sigmoid normalization to 0-1)
+**Pipeline**: Crawl4AI (Playwright, JS SPA) → fit_markdown (extracts main content, strips nav/footer/sidebar) → chunk (2000 chars configurable, 100 overlap, paragraph boundaries) → multi-qa-mpnet-base-cos-v1 (768d) → Qdrant (COSINE) → FastAPI `/search` (bi-encoder recall → cross-encoder/ms-marco-MiniLM-L-6-v2 rerank → sigmoid normalization to 0-1) → low-relevance `_hint` when best CE < 0.3
 
 **Two databases, different roles:**
-- **SQLite** (`data/config.db`, WAL mode): configuration store — URLs to crawl, crawl history, app config (chunk size, overlap, search limit, rerank pool, label match mode, boost weight). Accessed via `store.py` functions only. Multi-label URLs stored in `url_labels` linking table.
+- **SQLite** (`data/config.db`, WAL mode): configuration store — URLs to crawl, crawl history, app config (chunk size, overlap, search limit, rerank pool, label match mode, boost weight, min CE threshold). Accessed via `store.py` functions only. Multi-label URLs stored in `url_labels` linking table.
 - **Qdrant** (`qdrant_data/`): vector embeddings + payload (`url`, `label`, `chunk_index`, `page_index`, `content`). Collection: `internal_docs`. Each chunk is replicated once per label so any single label filter matches.
 
 **MCP endpoint** (`/mcp/` — trailing slash required): Exposes 4 tools for LLM agents — `list_labels`, `search_docs`, `add_url_to_crawl`, `trigger_crawl`. Uses FastMCP 3.x (`http_app(path="/")` + manual nested `async with` lifespan). Mount is at `/mcp` with sub-app route at `/`; Starlette strips `/mcp/` prefix leaving `/` which matches. The trailing slash is needed because stripping `/mcp` leaves `""` which doesn't match `/`. Static files mount at `/static` (NOT `/`) to avoid the `/` mount from intercepting `/mcp` routes. Dashboard served at `/` via `FileResponse`.
@@ -74,6 +74,16 @@ Or add globally: `claude mcp add --transport http doc-search http://localhost:80
 **Background ingest**: `POST /ingest` spawns `asyncio.create_task(_background_ingest())` which calls `ingest.run_ingest(on_progress=callback)`. Progress tracked in module-level `_ingest_state` dict, polled via `GET /ingest/status`. Frontend polls every 1s during crawl.
 
 **Vector cleanup on URL delete**: `DELETE /urls/{id}` removes vectors from Qdrant via `FilterSelector` matching on `url` payload key, then deletes from SQLite.
+
+**Vector cleanup on re-crawl**: Before ingesting new chunks for a URL, old vectors for that URL are deleted from Qdrant via `FilterSelector(must=[url])`. This prevents stale nav-junk chunks from accumulating across re-crawls.
+
+**fit_markdown**: Crawl4AI's `result.markdown.fit_markdown` extracts the main page content (like browser reader mode), automatically stripping navigation, sidebars, footers, and other boilerplate. Falls back to raw `markdown` if `fit_markdown` is empty.
+
+**Low-relevance hints**: `/search` API and MCP `search_docs` both return `_hint` when the best cross-encoder score is below 0.3 and no label filter is active. The hint lists available labels so the caller knows what topics/languages exist and can re-search with appropriate filters.
+
+**min_ce_threshold** config (default 0.0, range 0–1): Filters results whose cross-encoder score falls below the threshold. Applied in both hard and boost label modes.
+
+**MCP full content**: Unlike earlier versions that truncated `content` to 500 chars (causing mid-sentence cutoffs), `search_docs` now returns the complete chunk content (up to `chunk_max_chars`, default 2000). The API `/search` endpoint also returns full content.
 
 **Dashboard UI**: Tailwind CSS (Play CDN) with dark theme. Sections: stats bar (4-cards), search with label chips, URLs table, config form, API endpoint reference, MCP setup guide. Mobile responsive (stacks to single column). See `static/index.html`.
 

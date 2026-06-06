@@ -7,9 +7,9 @@ Also exposes an **MCP endpoint** so Claude Code, Claude Desktop, Codex, and othe
 ## Architecture
 
 ```
-JS SPA Docs → Crawl4AI (Playwright) → Markdown → Chunk (2000 chars, 100 overlap)
-    → multi-qa-mpnet-base-cos-v1 (768d) → Qdrant → FastAPI /search
-    → Cross-encoder rerank (ms-marco-MiniLM-L-6-v2) → Top-N results
+JS SPA Docs → Crawl4AI (Playwright) → fit_markdown (main content extraction)
+    → Chunk (2000 chars, 100 overlap) → multi-qa-mpnet-base-cos-v1 (768d)
+    → Qdrant → FastAPI /search → Cross-encoder rerank → Low-CE hints
 
 LLM/Agent → MCP /mcp/ → list_labels() / search_docs() / add_url_to_crawl() / trigger_crawl()
 ```
@@ -102,7 +102,7 @@ The server exposes an **MCP (Model Context Protocol)** endpoint at `/mcp/`. LLM 
 | Tool | Description |
 |------|-------------|
 | `list_labels()` | **Call first** — discover available topics/languages with chunk counts |
-| `search_docs(query, limit, labels)` | Semantic search with cross-encoder rerank, multi-label filter, low-relevance hints |
+| `search_docs(query, limit, labels)` | Semantic search with full-chunk content, cross-encoder rerank, multi-label filter, low-CE hints |
 | `add_url_to_crawl(url, labels, deep_crawl, depth, patterns)` | Add documentation URL with multi-label and deep crawl config |
 | `trigger_crawl(mode)` | Start background crawl: `"all"` recrawls everything, `"new"` only pending/failed |
 
@@ -261,7 +261,7 @@ internal-doc-search/
 
 ## Tech Stack
 
-- **Crawl4AI** (Playwright-based) — JS SPA crawling + Markdown conversion, BFS deep crawl support
+- **Crawl4AI** (Playwright-based) — JS SPA crawling + built-in fit_markdown (main content extraction, strips nav/footer/sidebar), BFS deep crawl support
 - **Qdrant** — Vector search engine (Rust, COSINE distance)
 - **multi-qa-mpnet-base-cos-v1** — Bi-encoder (768d, trained on 215M QA pairs)
 - **cross-encoder/ms-marco-MiniLM-L-6-v2** — Reranker (sigmoid-normalized to 0–1)
