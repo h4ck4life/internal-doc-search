@@ -480,8 +480,6 @@ async def trigger_crawl(mode: str = "all") -> dict:
     _ingest_process = _sp.Popen(
         [python, "ingest.py", "--mode", mode],
         cwd=_os.path.dirname(_os.path.abspath(__file__)),
-        stdout=_sp.PIPE,
-        stderr=_sp.STDOUT,
     )
 
     return {

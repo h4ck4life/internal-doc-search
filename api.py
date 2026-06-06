@@ -247,8 +247,6 @@ async def ingest(mode: str = Query(default="all", pattern="^(all|new)$")):
     _ingest_process = subprocess.Popen(
         [python, "ingest.py", "--mode", mode],
         cwd=os.path.dirname(os.path.abspath(__file__)),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
     )
 
     return {
