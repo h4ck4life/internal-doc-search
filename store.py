@@ -43,6 +43,14 @@ def init_db() -> None:
                 created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS url_labels (
+                url_id INTEGER NOT NULL REFERENCES urls(id) ON DELETE CASCADE,
+                label TEXT NOT NULL,
+                PRIMARY KEY (url_id, label)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_url_labels_label ON url_labels(label);
+
             CREATE TABLE IF NOT EXISTS config (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL,
@@ -56,6 +64,11 @@ def init_db() -> None:
         _migrate_add_column(conn, "urls", "deep_crawl_max_depth", "INTEGER DEFAULT 3")
         _migrate_add_column(conn, "urls", "deep_crawl_url_pattern", "TEXT DEFAULT ''")
         _migrate_add_column(conn, "urls", "deep_crawl_exclude_pattern", "TEXT DEFAULT ''")
+        conn.commit()
+
+        # Migrate: copy legacy single-label rows into url_labels so search
+        # keeps working after the schema upgrade.
+        _migrate_seed_url_labels(conn)
         conn.commit()
     finally:
         conn.close()
@@ -78,24 +91,92 @@ def _migrate_add_column(conn: sqlite3.Connection, table: str, column: str, col_d
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_def}")
 
 
+def _migrate_seed_url_labels(conn: sqlite3.Connection) -> None:
+    """One-time: copy legacy urls.label into url_labels so old single-label
+    rows are visible to the new multi-label filter and /labels endpoint."""
+    rows = conn.execute(
+        "SELECT id, label FROM urls WHERE label != '' AND id NOT IN (SELECT url_id FROM url_labels)"
+    ).fetchall()
+    for r in rows:
+        conn.execute(
+            "INSERT OR IGNORE INTO url_labels (url_id, label) VALUES (?, ?)",
+            (r["id"], r["label"]),
+        )
+
+
+def _normalize_labels(raw) -> List[str]:
+    """Strip whitespace, drop empties, dedup (preserve order)."""
+    if not raw:
+        return []
+    out: List[str] = []
+    seen: set = set()
+    for item in raw:
+        s = str(item).strip()
+        if s and s not in seen:
+            seen.add(s)
+            out.append(s)
+    return out
+
+
+def _set_url_labels(conn: sqlite3.Connection, url_id: int, labels: List[str]) -> None:
+    """Replace the label set for a URL. Empty list clears all."""
+    conn.execute("DELETE FROM url_labels WHERE url_id = ?", (url_id,))
+    for lbl in labels:
+        conn.execute(
+            "INSERT OR IGNORE INTO url_labels (url_id, label) VALUES (?, ?)",
+            (url_id, lbl),
+        )
+
+
+def _get_url_labels(conn: sqlite3.Connection, url_id: int) -> List[str]:
+    rows = conn.execute(
+        "SELECT label, rowid FROM url_labels WHERE url_id = ? ORDER BY rowid",
+        (url_id,),
+    ).fetchall()
+    return [r["label"] for r in rows]
+
+
 # ─── URL CRUD ────────────────────────────────────────────────────
 
 
-def add_url(url: str, label: str = "", deep_crawl: bool = False, deep_crawl_max_depth: int = 3,
+def add_url(url: str, label: str = "", labels: Optional[List[str]] = None,
+            deep_crawl: bool = False, deep_crawl_max_depth: int = 3,
             deep_crawl_url_pattern: str = "", deep_crawl_exclude_pattern: str = "") -> dict:
-    """Add a URL to crawl. Returns the created row as dict."""
+    """Add a URL to crawl. Returns the created row as dict with a 'labels' list.
+
+    Args:
+        url: The page URL (must be unique).
+        label: Legacy single-label field. If `labels` is also provided, the
+            first label in `labels` becomes the primary (denormalized) `label`.
+            If `label` is given alone, it is treated as `labels=[label]`.
+        labels: Optional list of topic labels for the URL. Stored in the
+            url_labels table; chunks are upserted once per label.
+    """
+    # Merge: explicit labels > legacy label
+    if labels is not None:
+        merged = _normalize_labels(labels)
+    elif label:
+        merged = _normalize_labels([label])
+    else:
+        merged = []
+    primary = merged[0] if merged else ""
+
     conn = _get_conn()
     try:
         cur = conn.execute(
             "INSERT INTO urls (url, label, status, deep_crawl, deep_crawl_max_depth, "
             "deep_crawl_url_pattern, deep_crawl_exclude_pattern, created_at) "
             "VALUES (?, ?, 'pending', ?, ?, ?, ?, ?)",
-            (url, label, int(deep_crawl), deep_crawl_max_depth,
+            (url, primary, int(deep_crawl), deep_crawl_max_depth,
              deep_crawl_url_pattern, deep_crawl_exclude_pattern, _now_iso()),
         )
+        url_id = cur.lastrowid
+        _set_url_labels(conn, url_id, merged)
         conn.commit()
-        row = conn.execute("SELECT * FROM urls WHERE id = ?", (cur.lastrowid,)).fetchone()
-        return dict(row)
+        row = conn.execute("SELECT * FROM urls WHERE id = ?", (url_id,)).fetchone()
+        result = dict(row)
+        result["labels"] = _get_url_labels(conn, url_id)
+        return result
     except sqlite3.IntegrityError:
         raise ValueError(f"URL already exists: {url}")
     finally:
@@ -103,13 +184,16 @@ def add_url(url: str, label: str = "", deep_crawl: bool = False, deep_crawl_max_
 
 
 def list_urls() -> List[dict]:
-    """List all configured URLs."""
+    """List all configured URLs. Each row includes a 'labels' list (possibly empty)."""
     conn = _get_conn()
     try:
-        rows = conn.execute(
-            "SELECT * FROM urls ORDER BY created_at DESC"
-        ).fetchall()
-        return [dict(r) for r in rows]
+        rows = conn.execute("SELECT * FROM urls ORDER BY created_at DESC").fetchall()
+        out: List[dict] = []
+        for r in rows:
+            d = dict(r)
+            d["labels"] = _get_url_labels(conn, d["id"])
+            out.append(d)
+        return out
     finally:
         conn.close()
 
@@ -118,12 +202,23 @@ def update_url(
     url_id: int,
     url: Optional[str] = None,
     label: Optional[str] = None,
+    labels: Optional[List[str]] = None,
     deep_crawl: Optional[bool] = None,
     deep_crawl_max_depth: Optional[int] = None,
     deep_crawl_url_pattern: Optional[str] = None,
     deep_crawl_exclude_pattern: Optional[str] = None,
 ) -> Optional[dict]:
-    """Update a URL. Returns updated row or None if not found."""
+    """Update a URL. Returns updated row or None if not found.
+
+    Label semantics:
+      - `labels` is the source of truth. If provided (even as []), it
+        REPLACES all url_labels rows for this URL and the primary `label`
+        column is set to the first entry (or '' if empty).
+      - `label` (legacy single) is only honored when `labels` is None;
+        it acts like `labels=[label]` for back-compat.
+    Note: changing labels does NOT auto-re-ingest. Call trigger_crawl()
+    manually to re-upsert chunks under the new label set.
+    """
     conn = _get_conn()
     try:
         existing = conn.execute("SELECT * FROM urls WHERE id = ?", (url_id,)).fetchone()
@@ -131,21 +226,36 @@ def update_url(
             return None
 
         new_url = url if url is not None else existing["url"]
-        new_label = label if label is not None else existing["label"]
         new_dc = int(deep_crawl) if deep_crawl is not None else existing["deep_crawl"]
         new_dc_depth = deep_crawl_max_depth if deep_crawl_max_depth is not None else existing["deep_crawl_max_depth"]
         new_dc_url_pat = deep_crawl_url_pattern if deep_crawl_url_pattern is not None else existing["deep_crawl_url_pattern"]
         new_dc_excl_pat = deep_crawl_exclude_pattern if deep_crawl_exclude_pattern is not None else existing["deep_crawl_exclude_pattern"]
 
+        # Resolve the new label set
+        if labels is not None:
+            merged = _normalize_labels(labels)
+        elif label is not None:
+            merged = _normalize_labels([label])
+        else:
+            merged = None  # don't change
+
+        if merged is not None:
+            new_label_primary = merged[0] if merged else ""
+            _set_url_labels(conn, url_id, merged)
+        else:
+            new_label_primary = existing["label"]
+
         conn.execute(
             "UPDATE urls SET url=?, label=?, deep_crawl=?, deep_crawl_max_depth=?, "
             "deep_crawl_url_pattern=?, deep_crawl_exclude_pattern=? WHERE id=?",
-            (new_url, new_label, new_dc, new_dc_depth,
+            (new_url, new_label_primary, new_dc, new_dc_depth,
              new_dc_url_pat, new_dc_excl_pat, url_id),
         )
         conn.commit()
         row = conn.execute("SELECT * FROM urls WHERE id = ?", (url_id,)).fetchone()
-        return dict(row)
+        result = dict(row)
+        result["labels"] = _get_url_labels(conn, url_id)
+        return result
     except sqlite3.IntegrityError:
         raise ValueError(f"URL already exists: {url}")
     finally:

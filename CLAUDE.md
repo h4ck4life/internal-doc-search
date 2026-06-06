@@ -37,7 +37,7 @@ python ingest.py
 - **SQLite** (`data/config.db`, WAL mode): configuration store — URLs to crawl, crawl history, app config (chunk size, overlap, search limit, rerank pool). Accessed via `store.py` functions only.
 - **Qdrant** (`qdrant_data/`): vector embeddings + payload (`url`, `label`, `chunk_index`, `page_index`, `content`). Collection: `internal_docs`.
 
-**MCP endpoint** (`/mcp`): Exposes 3 tools for LLM agents — `search_docs`, `add_url_to_crawl`, `trigger_crawl`. Uses FastMCP SDK 1.27.x (`streamable_http_app()`, NOT the older `http_app()`). Lifespans are combined manually via `_combine_lifespans()` in `api.py` — the `fastmcp.utilities.lifespan.combine_lifespans` function does NOT exist in this SDK version.
+**MCP endpoint** (`/mcp/` — trailing slash required): Exposes 3 tools for LLM agents — `search_docs`, `add_url_to_crawl`, `trigger_crawl`. Uses FastMCP 3.x (`http_app(path="/")` + manual nested `async with` lifespan). Mount is at `/mcp` with sub-app route at `/`; Starlette strips `/mcp/` prefix leaving `/` which matches. The trailling slash is needed because stripping `/mcp` leaves `""` which doesn't match `/`. Static files mount at `/static` (NOT `/`) to avoid the `/` mount from intercepting `/mcp` routes.
 
 **Deep crawl per URL**: Each URL in `store.py` has `deep_crawl`, `deep_crawl_max_depth`, `deep_crawl_url_pattern` (comma-separated wildcards → `URLPatternFilter` via `FilterChain`), and `deep_crawl_exclude_pattern` (post-crawl result filtering via `_wildcard_match()`). The `url_pattern`/`exclude_pattern` params in the user-facing API map to Crawl4AI's `FilterChain` + `URLPatternFilter` — they are NOT direct BFSDeepCrawlStrategy constructor arguments.
 

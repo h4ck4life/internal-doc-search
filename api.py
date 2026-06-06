@@ -18,7 +18,10 @@ from store import (
     update_url,
     delete_url,
     get_config,
+    set_config,
 )
+
+from label_resolver import parse_labels, build_filter, apply_label_boost
 
 COLLECTION_NAME = "internal_docs"
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
@@ -48,19 +51,36 @@ def _load_models() -> None:
 
 @asynccontextmanager
 async def app_lifespan(app: FastAPI):
-    """Load models, init DB, and run MCP session manager in its own task group."""
+    """App-level setup: load ML models and init the SQLite config DB."""
     _load_models()
     init_db()
-    # MCP session_manager.run() is an async context manager that initializes
-    # the underlying anyio task group — required for streamable HTTP to work.
-    async with mcp_app.session_manager.run():
-        yield
+    yield
 
 
 from mcp_server import mcp as mcp_app
 
-mcp_asgi = mcp_app.streamable_http_app()
-app = FastAPI(title="Internal Doc Search", lifespan=app_lifespan)
+# FastMCP 3.x: http_app(path='/') means the sub-app's route is at "/".
+# We mount at "/mcp" so Starlette strips that prefix; the residual ""
+# is normalized to "/" which matches the sub-app's route. Do NOT pass
+# `transport='streamable-http'` or `json_response=True` here — those
+# break the session-manager lifespan and cause 405 on POST /mcp.
+# Combined lifespan starts the MCP session manager via manual nesting.
+mcp_asgi = mcp_app.http_app(path="/")
+
+# Combine our app setup (model load + DB init) with MCP's session-manager
+# lifespan. We use manual async-with nesting (not `combine_lifespans`)
+# because it gives explicit control over the MCP lifespan ordering.
+# Reference: https://gofastmcp.com/integrations/fastapi
+@asynccontextmanager
+async def combined_lifespan(app: FastAPI):
+    async with app_lifespan(app):
+        async with mcp_asgi.lifespan(app):
+            yield
+
+app = FastAPI(
+    title="Internal Doc Search",
+    lifespan=combined_lifespan,
+)
 
 # ─── Request/Response models ─────────────────────────────────────
 
@@ -68,6 +88,7 @@ app = FastAPI(title="Internal Doc Search", lifespan=app_lifespan)
 class URLInput(BaseModel):
     url: str
     label: str = ""
+    labels: list[str] = []
     deep_crawl: bool = False
     deep_crawl_max_depth: int = 3
     deep_crawl_url_pattern: str = ""
@@ -77,6 +98,7 @@ class URLInput(BaseModel):
 class URLUpdate(BaseModel):
     url: Optional[str] = None
     label: Optional[str] = None
+    labels: Optional[list[str]] = None
     deep_crawl: Optional[bool] = None
     deep_crawl_max_depth: Optional[int] = None
     deep_crawl_url_pattern: Optional[str] = None
@@ -117,31 +139,46 @@ async def _background_ingest():
 
 @app.get("/search")
 async def search(q: str = Query(...), limit: int = Query(default=5, ge=1, le=50),
-                 label: str = Query(default="")):
+                 label: list[str] = Query(default=[]),
+                 label_match_mode: str = Query(default="")):
     """Two-stage retrieval: bi-encoder recall → cross-encoder rerank.
 
-    Optionally filter by label (source document set). Leave empty to search all docs.
+    Multi-label filter via repeated `label` query params (FastAPI list[str]):
+      ?label=Auth&label=Pricing     → include any-of (OR)
+      ?label=-Changelog              → exclude Changelog
+      ?label=Auth&label=-Changelog   → Auth OR Pricing, but not Changelog
+    A single `label=A,B` (comma-separated) is also parsed.
+
+    `label_match_mode`:
+      - "hard" (default): pre-filter Qdrant by labels. Off-label docs excluded.
+      - "boost": fetch 3× candidates, blend label-match into final score.
+                 Off-label docs may still surface at lower rank.
     """
     client = AsyncQdrantClient(url=QDRANT_URL, check_compatibility=False)
 
     try:
         rerank_candidates = int(get_config("rerank_candidates", "50"))
+        mode = label_match_mode or get_config("label_match_mode", "hard")
+        if mode not in ("hard", "boost"):
+            raise HTTPException(status_code=400, detail=f"label_match_mode must be 'hard' or 'boost', got {mode!r}")
+
+        positive, negative = parse_labels(label)
+        # Boost mode: fetch more candidates so off-label docs have a chance
+        candidate_limit = rerank_candidates * 3 if mode == "boost" else rerank_candidates
+        qfilter = build_filter(positive, negative)
+        # In boost mode, we want to see off-label candidates, so don't pre-filter
+        if mode == "boost":
+            qfilter = build_filter([], negative) if negative else None
 
         # Stage 1: Bi-encoder retrieval
         query_vector = bi_encoder.encode(q).tolist()
         query_kwargs = dict(
             collection_name=COLLECTION_NAME,
             query=query_vector,
-            limit=rerank_candidates,
+            limit=candidate_limit,
         )
-        # Add label filter if specified
-        if label:
-            query_kwargs["query_filter"] = models.Filter(
-                must=[models.FieldCondition(
-                    key="label",
-                    match=models.MatchValue(value=label),
-                )]
-            )
+        if qfilter is not None:
+            query_kwargs["query_filter"] = qfilter
         results = await client.query_points(**query_kwargs)
 
         if not results.points:
@@ -151,11 +188,17 @@ async def search(q: str = Query(...), limit: int = Query(default=5, ge=1, le=50)
         pairs = [(q, point.payload.get("content", "")) for point in results.points]
         ce_scores = cross_encoder.predict(pairs)
 
-        # Normalize CE scores to 0–1 via sigmoid for interpretability
+        if mode == "boost" and positive:
+            label_weight = float(get_config("label_boost_weight", "0.3"))
+            return apply_label_boost(
+                results.points, ce_scores, positive,
+                label_weight=label_weight, limit=limit,
+            )
+
+        # Hard filter mode (or boost with no positive labels) — pure CE sort
         import math
         def sigmoid(x): return 1 / (1 + math.exp(-x))
 
-        # Combine, deduplicate by content fingerprint, sort by CE score
         seen = set()
         combined = []
         for point, ce_score in zip(results.points, ce_scores):
@@ -254,31 +297,50 @@ async def get_urls():
 
 @app.get("/labels")
 async def get_labels():
-    """Return distinct labels from configured URLs for search dropdown."""
-    urls = list_urls()
-    labels = sorted({u["label"] for u in urls if u.get("label")})
-    return labels
+    """Return distinct labels with URL counts for chip-based search UI.
+
+    Reads from the url_labels table (source of truth for multi-label URLs).
+    Each URL with labels=['Auth', 'API'] contributes to both counts.
+    """
+    from store import _get_conn
+    conn = _get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT label, COUNT(DISTINCT url_id) AS urls "
+            "FROM url_labels GROUP BY label ORDER BY label"
+        ).fetchall()
+        return [{"label": r["label"], "urls": r["urls"]} for r in rows]
+    finally:
+        conn.close()
 
 
 @app.post("/urls", status_code=201)
 async def create_url(body: URLInput):
-    """Add a new crawl URL."""
+    """Add a new crawl URL. `labels` (list) wins over `label` (legacy single)."""
     try:
-        return add_url(body.url, body.label, deep_crawl=body.deep_crawl, deep_crawl_max_depth=body.deep_crawl_max_depth,
-                       deep_crawl_url_pattern=body.deep_crawl_url_pattern,
-                       deep_crawl_exclude_pattern=body.deep_crawl_exclude_pattern)
+        return add_url(
+            body.url,
+            label=body.label,
+            labels=body.labels or None,
+            deep_crawl=body.deep_crawl,
+            deep_crawl_max_depth=body.deep_crawl_max_depth,
+            deep_crawl_url_pattern=body.deep_crawl_url_pattern,
+            deep_crawl_exclude_pattern=body.deep_crawl_exclude_pattern,
+        )
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
 
 
 @app.put("/urls/{url_id}")
 async def update_url_endpoint(url_id: int, body: URLUpdate):
-    """Update a crawl URL."""
+    """Update a crawl URL. `labels` (list) replaces the URL's label set; `label` (single)
+    is the legacy single-label field. If both are provided, `labels` wins."""
     try:
         result = update_url(
             url_id,
             url=body.url,
             label=body.label,
+            labels=body.labels,
             deep_crawl=body.deep_crawl,
             deep_crawl_max_depth=body.deep_crawl_max_depth,
             deep_crawl_url_pattern=body.deep_crawl_url_pattern,
@@ -330,12 +392,13 @@ async def delete_url_endpoint(url_id: int):
 @app.get("/config")
 async def get_config_endpoint():
     """Return all app configuration values."""
-    from store import get_config
     return {
         "chunk_max_chars": int(get_config("chunk_max_chars", "2000")),
         "chunk_overlap": int(get_config("chunk_overlap", "100")),
         "search_limit": int(get_config("search_limit", "7")),
         "rerank_candidates": int(get_config("rerank_candidates", "50")),
+        "label_match_mode": get_config("label_match_mode", "hard"),
+        "label_boost_weight": float(get_config("label_boost_weight", "0.3")),
         "embedding_model": "multi-qa-mpnet-base-cos-v1",
         "cross_encoder_model": "cross-encoder/ms-marco-MiniLM-L-6-v2",
     }
@@ -344,8 +407,16 @@ async def get_config_endpoint():
 @app.put("/config")
 async def update_config_endpoint(body: dict):
     """Update app configuration values. Accepts any subset of keys."""
-    from store import set_config
-    allowed = {"chunk_max_chars", "chunk_overlap", "search_limit", "rerank_candidates"}
+    allowed = {
+        "chunk_max_chars", "chunk_overlap", "search_limit", "rerank_candidates",
+        "label_match_mode", "label_boost_weight",
+    }
+    if "label_match_mode" in body and body["label_match_mode"] not in ("hard", "boost"):
+        raise HTTPException(status_code=400, detail="label_match_mode must be 'hard' or 'boost'")
+    if "label_boost_weight" in body:
+        w = float(body["label_boost_weight"])
+        if not 0.0 <= w <= 1.0:
+            raise HTTPException(status_code=400, detail="label_boost_weight must be in [0, 1]")
     updated = {}
     for key, value in body.items():
         if key in allowed:
@@ -356,8 +427,16 @@ async def update_config_endpoint(body: dict):
     return {"status": "updated", "config": updated}
 
 
-# MCP is mounted at root: Starlette Mount always prepends "/" to the
-# remaining path inside the sub-app, so the MCP route at "/mcp" needs
-# to be served at the root mount to receive "/mcp" requests correctly.
-app.mount("/", mcp_asgi)
+# MCP mount at /mcp with path='/' in the sub-app. Starlette strips the
+# "/mcp" prefix, residual "" is normalized to "/", matching the sub-app's
+# route. Static is at /static (NOT /) — a / mount would match ALL path
+# prefixes and block the /mcp mount (Starlette picks first mount, not most-
+# specific, and both match /mcp).
+app.mount("/mcp", mcp_asgi)
 app.mount("/static", StaticFiles(directory="static", html=True), name="static")
+
+# Root redirect: / → /static/ so user doesn't see 404 on the home page.
+@app.get("/")
+async def root():
+    from starlette.responses import RedirectResponse
+    return RedirectResponse(url="/static/")

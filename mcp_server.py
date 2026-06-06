@@ -1,20 +1,21 @@
 """MCP server for Internal Doc Search — exposes tools for LLM agents.
 
 Tools:
-  - search_docs: Semantic search with two-stage retrieval
+  - list_labels: List all available labels with chunk/URL counts
+  - search_docs: Semantic search with two-stage retrieval, multi-label filter
   - add_url_to_crawl: Add a URL to the crawl queue
   - trigger_crawl: Start background re-ingestion
 
-Run: `mcp run mcp_server.py` (standalone) or mounted in FastAPI via `mcp.streamable_http_app()`
+Run: `fastmcp run mcp_server.py` (standalone) or mounted in FastAPI via `mcp.http_app()`
 """
 
 import asyncio
 import os
 from typing import Optional
 
-from mcp.server.fastmcp import FastMCP
+from fastmcp import FastMCP
 
-mcp = FastMCP("Doc Search", json_response=True)
+mcp = FastMCP("Doc Search")
 
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
 COLLECTION_NAME = "internal_docs"
@@ -27,7 +28,6 @@ def _ensure_imports():
     global _imports_loaded
     if _imports_loaded:
         return
-    # Import everything needed so tools don't pay penalty each call
     global SentenceTransformer, CrossEncoder, AsyncQdrantClient, models
     global init_db, list_urls, add_url, get_config
     from sentence_transformers import SentenceTransformer, CrossEncoder  # noqa: F811
@@ -36,30 +36,152 @@ def _ensure_imports():
     _imports_loaded = True
 
 
-@mcp.tool()
-async def search_docs(query: str, limit: int = 5, label: str = "") -> list[dict]:
-    """Semantic search across crawled documentation.
+def _parse_labels(raw: Optional[list[str]]) -> tuple[list[str], list[str]]:
+    """Split raw label list into positive and negative (prefix '-')."""
+    positive: list[str] = []
+    negative: list[str] = []
+    for item in raw or []:
+        for piece in str(item).split(","):
+            piece = piece.strip()
+            if not piece:
+                continue
+            if piece.startswith("-"):
+                neg = piece[1:].strip()
+                if neg and neg not in negative:
+                    negative.append(neg)
+            else:
+                if piece not in positive:
+                    positive.append(piece)
+    return positive, negative
 
-    Uses two-stage retrieval: bi-encoder recall from Qdrant followed by
-    cross-encoder reranking for accuracy.
+
+def _build_filter(positive: list[str], negative: list[str]):
+    """Build Qdrant filter: should=OR for positive, must_not for negative."""
+    from qdrant_client import models  # noqa: F811
+    if not positive and not negative:
+        return None
+    kwargs = {}
+    if positive:
+        kwargs["should"] = [
+            models.FieldCondition(key="label", match=models.MatchValue(value=v))
+            for v in positive
+        ]
+    if negative:
+        kwargs["must_not"] = [
+            models.FieldCondition(key="label", match=models.MatchValue(value=v))
+            for v in negative
+        ]
+    return models.Filter(**kwargs)
+
+
+def _normalize_scores(results, ce_scores, limit: int) -> list[dict]:
+    """Combine bi-encoder + cross-encoder, dedupe, sort, return top N."""
+    import math
+    seen: set = set()
+    combined = []
+    for point, ce_score in zip(results, ce_scores):
+        content = point.payload.get("content", "")
+        fp = hash(content[:100])
+        if fp in seen:
+            continue
+        seen.add(fp)
+        combined.append({
+            "cross_encoder_score": round(1 / (1 + math.exp(-float(ce_score))), 4),
+            "qdrant_score": round(point.score, 4),
+            "url": point.payload.get("url"),
+            "label": point.payload.get("label", ""),
+            "chunk_index": point.payload.get("chunk_index"),
+            "content": content[:500],
+        })
+    combined.sort(key=lambda x: x["cross_encoder_score"], reverse=True)
+    return combined[:limit]
+
+
+@mcp.tool()
+async def list_labels() -> list[dict]:
+    """List all available documentation labels with chunk and URL counts.
+
+    Call this BEFORE search_docs() when the user's question is about a specific
+    topic. The results tell you what labels exist so you can pick the right
+    filter — labels are user-defined per crawl source (e.g. "Auth", "Pricing",
+    "API Docs"). Pass the chosen label(s) to search_docs(labels=[...]) to scope
+    the search to that topic.
+
+    Returns:
+        List of {label, chunks, urls} sorted by chunk count descending.
+        Labels with 0 chunks are excluded.
+    """
+    _ensure_imports()
+    client = AsyncQdrantClient(url=QDRANT_URL, check_compatibility=False)  # noqa: F811
+    try:
+        # Scroll all points to aggregate label counts. For very large collections
+        # this could be optimized to a Qdrant facet aggregation API, but
+        # internal-doc scale is small enough that a full scroll is fine.
+        agg: dict[str, dict[str, int]] = {}
+        offset = None
+        while True:
+            points, offset = await client.scroll(
+                collection_name=COLLECTION_NAME,
+                offset=offset,
+                limit=500,
+                with_payload=["label", "url"],
+                with_vectors=False,
+            )
+            for p in points:
+                label = p.payload.get("label", "") or ""
+                url = p.payload.get("url", "") or ""
+                if not label:
+                    continue
+                bucket = agg.setdefault(label, {"chunks": 0, "urls": 0, "_urls": set()})
+                bucket["chunks"] += 1
+                bucket["_urls"].add(url)
+            if offset is None:
+                break
+
+        out = []
+        for label, b in agg.items():
+            out.append({
+                "label": label,
+                "chunks": b["chunks"],
+                "urls": len(b["_urls"]),
+            })
+        out.sort(key=lambda x: x["chunks"], reverse=True)
+        return out
+    finally:
+        await client.close()
+
+
+@mcp.tool()
+async def search_docs(query: str, limit: int = 5, labels: Optional[list[str]] = None) -> list[dict]:
+    """Semantic search across crawled documentation with two-stage retrieval.
+
+    Tip: If the question is topic-specific, call list_labels() first, then pass
+    the matching label(s) here to scope results.
 
     Args:
         query: The search query (natural language question)
         limit: Maximum number of results (1-20, default 5)
-        label: Optional filter by source label (e.g. "Crawl4AI Docs")
+        labels: Optional list of labels to filter by.
+            - Omit or pass [] to search all docs.
+            - Pass ["Auth", "Pricing"] to include any-of (OR).
+            - Prefix a label with "-" to exclude it: ["-Changelog"].
+            - Combine: ["Auth", "-Changelog"] — only Auth, never Changelog.
+            - Comma-separated strings also accepted: ["Auth, Pricing"].
 
     Returns:
-        List of results with scores, content previews, and source URLs
+        List of results with cross-encoder scores, content previews, and URLs.
     """
     _ensure_imports()
 
-    bi = SentenceTransformer("multi-qa-mpnet-base-cos-v1")  # noqa: F821
-    ce = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")  # noqa: F821
-    client = AsyncQdrantClient(url=QDRANT_URL, check_compatibility=False)  # noqa: F821
+    bi = SentenceTransformer("multi-qa-mpnet-base-cos-v1")  # noqa: F811
+    ce = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")  # noqa: F811
+    client = AsyncQdrantClient(url=QDRANT_URL, check_compatibility=False)  # noqa: F811
 
     try:
-        rerank_candidates = int(get_config("rerank_candidates", "50"))  # noqa: F821
-        import math
+        rerank_candidates = int(get_config("rerank_candidates", "50"))  # noqa: F811
+
+        positive, negative = _parse_labels(labels)
+        qfilter = _build_filter(positive, negative)
 
         query_vector = bi.encode(query).tolist()
         query_kwargs = dict(
@@ -67,13 +189,8 @@ async def search_docs(query: str, limit: int = 5, label: str = "") -> list[dict]
             query=query_vector,
             limit=rerank_candidates,
         )
-        if label:
-            query_kwargs["query_filter"] = models.Filter(  # noqa: F821
-                must=[models.FieldCondition(
-                    key="label",
-                    match=models.MatchValue(value=label),
-                )]
-            )
+        if qfilter is not None:
+            query_kwargs["query_filter"] = qfilter
         results = await client.query_points(**query_kwargs)
 
         if not results.points:
@@ -81,26 +198,7 @@ async def search_docs(query: str, limit: int = 5, label: str = "") -> list[dict]
 
         pairs = [(query, p.payload.get("content", "")) for p in results.points]
         ce_scores = ce.predict(pairs)
-
-        seen = set()
-        combined = []
-        for point, ce_score in zip(results.points, ce_scores):
-            content = point.payload.get("content", "")
-            fp = hash(content[:100])
-            if fp in seen:
-                continue
-            seen.add(fp)
-            combined.append({
-                "cross_encoder_score": round(1 / (1 + math.exp(-float(ce_score))), 4),
-                "qdrant_score": round(point.score, 4),
-                "url": point.payload.get("url"),
-                "label": point.payload.get("label", ""),
-                "chunk_index": point.payload.get("chunk_index"),
-                "content": content[:500],  # Truncate for LLM context
-            })
-
-        combined.sort(key=lambda x: x["cross_encoder_score"], reverse=True)
-        return combined[:limit]
+        return _normalize_scores(results.points, ce_scores, limit)
     finally:
         await client.close()
 
@@ -109,6 +207,7 @@ async def search_docs(query: str, limit: int = 5, label: str = "") -> list[dict]
 async def add_url_to_crawl(
     url: str,
     label: str = "",
+    labels: list[str] | None = None,
     deep_crawl: bool = False,
     deep_crawl_max_depth: int = 3,
     deep_crawl_url_pattern: str = "",
@@ -121,20 +220,26 @@ async def add_url_to_crawl(
 
     Args:
         url: The documentation page URL to crawl
-        label: Human-readable label (e.g., "Auth Docs")
+        label: Human-readable label (e.g., "Auth Docs") — legacy single-label.
+            Use `labels` for multi-label URLs. Ignored if `labels` is set.
+        labels: List of topic labels (e.g., ["Auth", "API"]). Pass multiple
+            when one URL covers several topics. Chunks are upserted once
+            per label, so search by any of them returns the chunks.
         deep_crawl: Whether to recursively follow links (BFS)
         deep_crawl_max_depth: Max depth for deep crawl (1-10)
         deep_crawl_url_pattern: Regex pattern to include URLs (e.g., ".*/docs/.*")
         deep_crawl_exclude_pattern: Regex pattern to exclude URLs (e.g., ".*/api/.*")
 
     Returns:
-        The created URL entry with its ID and status
+        The created URL entry with its ID, status, and the resolved labels list.
     """
     _ensure_imports()
-    init_db()  # noqa: F821
+    init_db()  # noqa: F811
     try:
-        return add_url(  # noqa: F821
-            url, label,
+        return add_url(  # noqa: F811
+            url,
+            label=label,
+            labels=labels,
             deep_crawl=deep_crawl,
             deep_crawl_max_depth=deep_crawl_max_depth,
             deep_crawl_url_pattern=deep_crawl_url_pattern,

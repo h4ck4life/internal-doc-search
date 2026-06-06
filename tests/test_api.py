@@ -1,31 +1,59 @@
 """Tests for API endpoints using FastAPI TestClient.
 
-Mock Qdrant where needed to avoid requiring a running instance.
+Mock everything that's heavy: Qdrant client, ML models, SQLite.
+Patterns from the refs (web search):
+  - Stub ML model with a Fake class (same API shape, not MagicMock — clearer failures).
+  - Swap the FastAPI lifespan via app.router.lifespan_context to skip
+    400MB+ model downloads in the startup hook.
+  - monkeypatch restores module state on teardown (no manual save/restore).
+  - tmp_path gives a per-test SQLite file that pytest deletes automatically.
 """
 
+import contextlib
+import numpy as np
 import pytest
 from unittest.mock import patch, AsyncMock, MagicMock
 from fastapi.testclient import TestClient
 
 
+class _FakeBiEncoder:
+    """Stand-in for SentenceTransformer. encode() returns a numpy array
+    with .tolist() — matches the contract api.py uses."""
+
+    def encode(self, text):
+        return np.zeros(768, dtype=np.float32)
+
+
+class _FakeCrossEncoder:
+    """Stand-in for CrossEncoder. predict() returns zeros (sigmoid(0) = 0.5)."""
+
+    def predict(self, pairs):
+        return [0.0] * len(pairs)
+
+
+@contextlib.asynccontextmanager
+async def _no_op_lifespan(app):
+    """Skip _load_models() and the FastMCP session manager — both heavy."""
+    yield
+
+
 @pytest.fixture
-def client():
-    """Create TestClient with models loaded."""
-    from api import app, _load_models, init_db
+def client(monkeypatch, tmp_path):
+    """Create TestClient with stubbed models, temp SQLite, and a no-op lifespan."""
     import store as store_module
-    import tempfile
-    import os
+    import api
 
-    old_path = store_module.DB_PATH
-    with tempfile.TemporaryDirectory() as tmpdir:
-        store_module.DB_PATH = os.path.join(tmpdir, "test_config.db")
-        _load_models()
-        init_db()
+    # 1. Skip the heavy lifespan (model download + MCP task group).
+    monkeypatch.setattr(api.app.router, "lifespan_context", _no_op_lifespan)
+    # 2. Redirect SQLite to a per-test temp file.
+    monkeypatch.setattr(store_module, "DB_PATH", str(tmp_path / "test_config.db"))
+    store_module.init_db()
+    # 3. Inject fake models before TestClient handles requests.
+    monkeypatch.setattr(api, "bi_encoder", _FakeBiEncoder())
+    monkeypatch.setattr(api, "cross_encoder", _FakeCrossEncoder())
 
-        with TestClient(app) as c:
-            yield c
-
-        store_module.DB_PATH = old_path
+    with TestClient(api.app) as c:
+        yield c
 
 
 # ─── Health endpoint ──────────────────────────────────────────────
@@ -64,6 +92,171 @@ def test_search_empty_collection(client):
         response = client.get("/search?q=test+query")
         assert response.status_code == 200
         assert response.json() == []
+
+
+def test_search_multi_label_builds_or_filter(client):
+    """/search?label=A&label=B passes a 'should' (OR) filter to Qdrant."""
+    from qdrant_client import models
+
+    mock_instance = AsyncMock()
+    mock_points = MagicMock()
+    mock_points.points = []
+    mock_instance.query_points = AsyncMock(return_value=mock_points)
+    mock_instance.close = AsyncMock()
+
+    with patch("api.AsyncQdrantClient", return_value=mock_instance):
+        response = client.get("/search?q=test&label=Auth&label=Pricing")
+        assert response.status_code == 200
+        # Verify the filter passed to Qdrant has should=[Auth, Pricing]
+        call = mock_instance.query_points.call_args
+        qfilter = call.kwargs.get("query_filter")
+        assert qfilter is not None
+        assert qfilter.should is not None
+        assert {c.match.value for c in qfilter.should} == {"Auth", "Pricing"}
+
+
+def test_search_negative_label_uses_must_not(client):
+    """/search?label=-Spam passes a must_not filter (valid alone in Qdrant)."""
+    from qdrant_client import models
+
+    mock_instance = AsyncMock()
+    mock_points = MagicMock()
+    mock_points.points = []
+    mock_instance.query_points = AsyncMock(return_value=mock_points)
+    mock_instance.close = AsyncMock()
+
+    with patch("api.AsyncQdrantClient", return_value=mock_instance):
+        response = client.get("/search?q=test&label=-Changelog")
+        assert response.status_code == 200
+        call = mock_instance.query_points.call_args
+        qfilter = call.kwargs.get("query_filter")
+        assert qfilter is not None
+        assert qfilter.must_not is not None
+        assert qfilter.must_not[0].match.value == "Changelog"
+
+
+def test_search_boost_mode_blends_scores(client):
+    """/search?label_match_mode=boost uses apply_label_boost to blend CE + label match."""
+    mock_point = MagicMock()
+    mock_point.score = 0.5
+    mock_point.payload = {"label": "Auth", "content": "OAuth flow", "chunk_index": 0}
+    mock_points = MagicMock()
+    mock_points.points = [mock_point]
+    mock_instance = AsyncMock()
+    mock_instance.query_points = AsyncMock(return_value=mock_points)
+    mock_instance.close = AsyncMock()
+
+    with patch("api.AsyncQdrantClient", return_value=mock_instance):
+        response = client.get("/search?q=oauth&label=Auth&label_match_mode=boost")
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data) == 1
+        # Boost mode adds final_score field
+        assert "final_score" in data[0]
+        assert "cross_encoder_score" in data[0]
+        assert data[0]["label"] == "Auth"
+        # Boost mode fetches more candidates (rerank * 3)
+        call = mock_instance.query_points.call_args
+        assert call.kwargs["limit"] >= 50  # default rerank * 3
+
+
+def test_search_invalid_label_match_mode_rejected(client):
+    """/search?label_match_mode=garbage returns 400."""
+    response = client.get("/search?q=test&label_match_mode=garbage")
+    assert response.status_code == 400
+
+
+def test_search_no_label_means_no_filter(client):
+    """/search without label passes no query_filter."""
+    mock_instance = AsyncMock()
+    mock_points = MagicMock()
+    mock_points.points = []
+    mock_instance.query_points = AsyncMock(return_value=mock_points)
+    mock_instance.close = AsyncMock()
+
+    with patch("api.AsyncQdrantClient", return_value=mock_instance):
+        response = client.get("/search?q=test")
+        assert response.status_code == 200
+        call = mock_instance.query_points.call_args
+        # No label filter applied
+        assert call.kwargs.get("query_filter") is None
+
+
+# ─── /labels ──────────────────────────────────────────────────────
+
+
+def test_get_labels_empty(client):
+    """GET /labels returns [] when no URLs have labels."""
+    response = client.get("/labels")
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+def test_get_labels_returns_label_and_url_count(client):
+    """GET /labels returns [{label, urls}] aggregated from configured URLs."""
+    client.post("/urls", json={"url": "https://a.com", "label": "Auth"})
+    client.post("/urls", json={"url": "https://b.com", "label": "Auth"})
+    client.post("/urls", json={"url": "https://c.com", "label": "Pricing"})
+
+    response = client.get("/labels")
+    data = response.json()
+    assert {d["label"] for d in data} == {"Auth", "Pricing"}
+    auth = next(d for d in data if d["label"] == "Auth")
+    assert auth["urls"] == 2
+    pricing = next(d for d in data if d["label"] == "Pricing")
+    assert pricing["urls"] == 1
+
+
+def test_get_labels_aggregates_from_url_labels_table(client):
+    """GET /labels counts each label even when a URL has multiple labels."""
+    # Single URL with two labels
+    client.post("/urls", json={"url": "https://x.com", "labels": ["Auth", "API"]})
+    # Another URL with one of those labels — Auth should show urls=2
+    client.post("/urls", json={"url": "https://y.com", "labels": ["Auth"]})
+
+    response = client.get("/labels")
+    data = response.json()
+    by_label = {d["label"]: d["urls"] for d in data}
+    assert by_label["Auth"] == 2
+    assert by_label["API"] == 1
+
+
+# ─── /config label match mode ─────────────────────────────────────
+
+
+def test_config_includes_label_match_mode(client):
+    """/config returns label_match_mode and label_boost_weight."""
+    response = client.get("/config")
+    data = response.json()
+    assert "label_match_mode" in data
+    assert data["label_match_mode"] in ("hard", "boost")
+    assert "label_boost_weight" in data
+    assert 0.0 <= float(data["label_boost_weight"]) <= 1.0
+
+
+def test_config_set_label_match_mode(client):
+    """PUT /config can update label_match_mode to 'boost'."""
+    response = client.put("/config", json={"label_match_mode": "boost"})
+    assert response.status_code == 200
+    assert response.json()["config"]["label_match_mode"] == "boost"
+
+    # Verify persisted
+    response = client.get("/config")
+    assert response.json()["label_match_mode"] == "boost"
+
+
+def test_config_rejects_invalid_label_match_mode(client):
+    """PUT /config with invalid label_match_mode returns 400."""
+    response = client.put("/config", json={"label_match_mode": "garbage"})
+    assert response.status_code == 400
+
+
+def test_config_rejects_invalid_boost_weight(client):
+    """PUT /config with boost_weight outside [0, 1] returns 400."""
+    response = client.put("/config", json={"label_boost_weight": 1.5})
+    assert response.status_code == 400
+    response = client.put("/config", json={"label_boost_weight": -0.1})
+    assert response.status_code == 400
 
 
 # ─── /docs-summary ────────────────────────────────────────────────
@@ -116,6 +309,52 @@ def test_create_url(client):
     assert data["status"] == "pending"
 
 
+def test_create_url_with_labels_list(client):
+    """POST /urls with labels=[...] stores all labels in url_labels."""
+    response = client.post("/urls", json={
+        "url": "https://example.com",
+        "labels": ["Auth", "API", "Billing"],
+    })
+    assert response.status_code == 201
+    data = response.json()
+    # labels list is returned (order preserved)
+    assert data["labels"] == ["Auth", "API", "Billing"]
+    # primary label is the first one
+    assert data["label"] == "Auth"
+
+
+def test_create_url_label_and_labels_labels_wins(client):
+    """When both label and labels are provided, labels wins."""
+    response = client.post("/urls", json={
+        "url": "https://example.com",
+        "label": "LegacyName",
+        "labels": ["NewName1", "NewName2"],
+    })
+    assert response.status_code == 201
+    data = response.json()
+    assert data["label"] == "NewName1"
+    assert data["labels"] == ["NewName1", "NewName2"]
+
+
+def test_create_url_with_deep_crawl_and_labels(client):
+    """POST /urls accepts both labels and deep_crawl params together."""
+    response = client.post("/urls", json={
+        "url": "https://example.com",
+        "labels": ["Docs"],
+        "deep_crawl": True,
+        "deep_crawl_max_depth": 5,
+        "deep_crawl_url_pattern": "*/docs/*",
+        "deep_crawl_exclude_pattern": "*/changelog/*",
+    })
+    assert response.status_code == 201
+    data = response.json()
+    assert data["labels"] == ["Docs"]
+    assert data["deep_crawl"] == 1
+    assert data["deep_crawl_max_depth"] == 5
+    assert data["deep_crawl_url_pattern"] == "*/docs/*"
+    assert data["deep_crawl_exclude_pattern"] == "*/changelog/*"
+
+
 def test_create_duplicate_url(client):
     """POST /urls duplicate returns 409."""
     client.post("/urls", json={"url": "https://example.com"})
@@ -140,6 +379,29 @@ def test_update_url(client):
     response = client.put(f"/urls/{created['id']}", json={"label": "New Label"})
     assert response.status_code == 200
     assert response.json()["label"] == "New Label"
+
+
+def test_update_url_with_labels_replaces(client):
+    """PUT /urls/{id} with labels=[...] replaces the existing label set."""
+    created = client.post("/urls", json={
+        "url": "https://example.com",
+        "labels": ["Auth", "API"],
+    }).json()
+    assert created["labels"] == ["Auth", "API"]
+
+    # Replace with a different set
+    response = client.put(f"/urls/{created['id']}", json={"labels": ["Billing"]})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["labels"] == ["Billing"]
+    assert data["label"] == "Billing"
+
+    # Empty list clears all labels
+    response = client.put(f"/urls/{created['id']}", json={"labels": []})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["labels"] == []
+    assert data["label"] == ""
 
 
 def test_update_nonexistent_url(client):
@@ -179,22 +441,22 @@ def test_delete_nonexistent_url(client):
 # ─── Ingest endpoint ──────────────────────────────────────────────
 
 
-def test_ingest_requires_crawl4ai(client):
-    """POST /ingest requires crawl4ai (Python 3.10+). Skip if not importable."""
-    try:
-        import ingest  # noqa: F401
-    except TypeError:
-        pytest.skip("crawl4ai requires Python 3.10+ — skipping ingest integration test")
-
-    # If ingest imports fine, test the endpoint
-    with patch("ingest.run_ingest") as mock_ingest:
-        mock_ingest.return_value = {
-            "status": "completed",
-            "urls_crawled": 0,
-            "chunks_stored": 0,
-            "message": "No URLs configured",
-        }
+def test_ingest_endpoint_returns_started(client):
+    """POST /ingest returns {status, total_urls} and triggers run_ingest."""
+    with patch("api._background_ingest") as mock_bg:
         response = client.post("/ingest")
         assert response.status_code == 200
         data = response.json()
-        assert data["urls_crawled"] == 0
+        assert data["status"] == "started"
+        assert "total_urls" in data
+
+
+def test_ingest_already_running_returns_409(client):
+    """POST /ingest while a crawl is in progress returns 409."""
+    import api as api_module
+    api_module._ingest_state["running"] = True
+    try:
+        response = client.post("/ingest")
+        assert response.status_code == 409
+    finally:
+        api_module._ingest_state["running"] = False

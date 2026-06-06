@@ -19,10 +19,10 @@ def test_init_db_creates_tables(temp_db):
 
 def test_seed_defaults(temp_db):
     """Default config values are seeded on first init."""
-    assert temp_db.get_config("chunk_max_chars") == "1200"
-    assert temp_db.get_config("chunk_overlap") == "200"
-    assert temp_db.get_config("search_limit") == "5"
-    assert temp_db.get_config("rerank_candidates") == "30"
+    assert temp_db.get_config("chunk_max_chars") == "2000"
+    assert temp_db.get_config("chunk_overlap") == "100"
+    assert temp_db.get_config("search_limit") == "7"
+    assert temp_db.get_config("rerank_candidates") == "50"
 
 
 def test_add_and_list_urls(temp_db):
@@ -35,6 +35,8 @@ def test_add_and_list_urls(temp_db):
     # Most recent first
     assert urls[0]["url"] == "https://other.com/api"
     assert urls[1]["label"] == "Example Docs"
+    # urls has a 'labels' list field (multi-label support)
+    assert urls[1]["labels"] == ["Example Docs"]
 
 
 def test_add_duplicate_url_raises(temp_db):
@@ -50,7 +52,77 @@ def test_new_url_has_pending_status(temp_db):
     assert result["status"] == "pending"
     assert result["chunk_count"] == 0
     assert result["last_crawled"] is None
-    assert result["error_message"] is None
+
+
+# ─── Multi-label URL add ──────────────────────────────────────────
+
+
+def test_add_url_with_labels_list(temp_db):
+    """add_url accepts labels=[] and stores them in url_labels."""
+    row = temp_db.add_url("https://example.com/auth-api", labels=["Auth", "API"])
+    assert row["labels"] == ["Auth", "API"]
+    # Primary label (first) is denormalized into urls.label
+    assert row["label"] == "Auth"
+
+    # list_urls returns the labels
+    urls = temp_db.list_urls()
+    assert urls[0]["labels"] == ["Auth", "API"]
+
+
+def test_add_url_label_and_labels_conflict_labels_wins(temp_db):
+    """When both label='X' and labels=['Y','Z'] are passed, labels wins."""
+    row = temp_db.add_url("https://example.com", label="X", labels=["Y", "Z"])
+    assert row["labels"] == ["Y", "Z"]
+    assert row["label"] == "Y"
+
+
+def test_add_url_labels_dedup_and_strip(temp_db):
+    """Whitespace stripped, duplicates removed, order preserved."""
+    row = temp_db.add_url("https://example.com", labels=[" Auth ", "API", "Auth", "Pricing"])
+    assert row["labels"] == ["Auth", "API", "Pricing"]
+
+
+def test_add_url_no_labels(temp_db):
+    """Empty labels list leaves label='' and labels=[]."""
+    row = temp_db.add_url("https://example.com", labels=[])
+    assert row["label"] == ""
+    assert row["labels"] == []
+
+
+def test_update_url_replaces_labels(temp_db):
+    """update_url with labels=[] replaces the entire label set."""
+    row = temp_db.add_url("https://example.com", labels=["Auth", "API"])
+    updated = temp_db.update_url(row["id"], labels=["Billing"])
+    assert updated["labels"] == ["Billing"]
+    assert updated["label"] == "Billing"
+
+    # Empty list clears
+    cleared = temp_db.update_url(row["id"], labels=[])
+    assert cleared["labels"] == []
+    assert cleared["label"] == ""
+
+
+def test_update_url_labels_none_keeps_existing(temp_db):
+    """update_url(labels=None) leaves existing labels alone."""
+    row = temp_db.add_url("https://example.com", labels=["Auth"])
+    updated = temp_db.update_url(row["id"], url="https://other.com")
+    assert updated["labels"] == ["Auth"]
+
+
+def test_migration_seeds_url_labels_from_legacy(temp_db):
+    """After init, legacy urls.label values appear in url_labels."""
+    # Simulate pre-migration DB by inserting directly
+    conn = temp_db._get_conn()
+    conn.execute(
+        "INSERT INTO urls (url, label, status, created_at) VALUES (?, ?, 'completed', ?)",
+        ("https://legacy.com", "LegacyDocs", "2024-01-01T00:00:00Z"),
+    )
+    conn.commit()
+    conn.close()
+    # Re-run init to trigger migration
+    temp_db.init_db()
+    urls = temp_db.list_urls()
+    assert urls[0]["labels"] == ["LegacyDocs"]
 
 
 def test_update_url_label(temp_db):

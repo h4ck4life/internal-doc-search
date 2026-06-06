@@ -54,6 +54,20 @@
   .result-url { font-size: 0.78rem; margin-top: 0.4rem; word-break: break-all; }
   .score-high { color: #4ade80; font-weight: 700; }  .score-mid { color: #facc15; font-weight: 700; }  .score-low { color: #f87171; font-weight: 700; }
 
+  /* Label chips */
+  .label-chips { display: flex; flex-wrap: wrap; gap: 0.3rem; align-items: center; margin-top: 0.4rem; min-height: 0.5rem; }
+  .chip { display: inline-flex; align-items: center; gap: 0.3rem; padding: 0.18rem 0.55rem; border-radius: 1rem; font-size: 0.78rem; font-weight: 500; background: #1e3a5f; color: #6c8cff; border: 1px solid #2a4d7a; cursor: default; }
+  .chip.neg { background: #450a0a; color: #f87171; border-color: #7a2a2a; }
+  .chip-x { cursor: pointer; opacity: 0.6; font-size: 0.9rem; line-height: 1; padding: 0 0.1rem; }
+  .chip-x:hover { opacity: 1; }
+  .chip-input { flex: 1; min-width: 140px; border: none; outline: none; background: transparent; padding: 0.18rem 0.4rem; font-size: 0.85rem; color: var(--pico-color); }
+  .chip-input::placeholder { opacity: 0.4; }
+  .chip-wrap { background: var(--pico-card-background-color); border: 1px solid var(--pico-card-border-color); border-radius: var(--pico-border-radius); padding: 0.25rem 0.4rem; margin-top: 0.3rem; }
+  .chip-suggest { position: absolute; background: var(--pico-card-background-color); border: 1px solid var(--pico-card-border-color); border-radius: var(--pico-border-radius); max-height: 180px; overflow-y: auto; z-index: 50; min-width: 200px; box-shadow: 0 4px 12px rgba(0,0,0,0.4); }
+  .chip-suggest-item { padding: 0.35rem 0.6rem; cursor: pointer; font-size: 0.85rem; }
+  .chip-suggest-item:hover, .chip-suggest-item.focused { background: var(--pico-secondary-hover-background); }
+  .chip-suggest-empty { padding: 0.35rem 0.6rem; opacity: 0.5; font-size: 0.8rem; }
+
   /* Progress */
   .progress-bar { height: 6px; background: var(--pico-muted-border-color); border-radius: 3px; margin: 0.5rem 0; overflow: hidden; }
   .progress-fill { height: 100%; background: var(--pico-primary); border-radius: 3px; transition: width 0.3s; }
@@ -101,8 +115,16 @@
     <h2 style="margin-top:0">🔎 Search</h2>
     <div class="add-url-row">
       <input type="search" id="searchQuery" placeholder='e.g. "How does OAuth token refresh work?"' onkeydown="if(event.key==='Enter')doSearch()" style="flex:3">
-      <select id="searchLabel" style="flex:1;min-width:120px"><option value="">All sources</option></select>
       <button id="searchBtn" onclick="doSearch()">Search</button>
+    </div>
+    <div class="chip-wrap" id="chipWrap" style="position:relative">
+      <div class="label-chips" id="labelChips">
+        <input type="text" id="chipInput" class="chip-input" placeholder="Filter by label (type label, prefix with - to exclude, Enter to add)…" autocomplete="off">
+      </div>
+      <div id="chipSuggest" class="chip-suggest hidden"></div>
+    </div>
+    <div style="font-size:0.72rem;opacity:0.5;margin-top:0.3rem">
+      <span id="labelModeHint">Mode: hard filter (off-label docs excluded)</span>
     </div>
     <div id="searchResults" style="margin-top:0.75rem"></div>
   </article>
@@ -115,7 +137,7 @@
       <article>
         <div class="add-url-row">
           <input type="url" id="newUrl" placeholder="https://docs.example.com">
-          <input type="text" id="newLabel" placeholder="Label">
+          <input type="text" id="newLabel" placeholder="Labels (comma-separated, e.g. Auth, API)">
           <button onclick="addUrl()">+ Add</button>
         </div>
         <div class="deep-row">
@@ -140,7 +162,7 @@
         </div>
         <div id="editRow" class="add-url-row hidden" style="margin-top:0.5rem;padding-top:0.5rem;border-top:1px solid var(--pico-muted-border-color)">
           <input type="url" id="editUrl" placeholder="URL">
-          <input type="text" id="editLabel" placeholder="Label">
+          <input type="text" id="editLabel" placeholder="Labels (comma-separated)">
           <button onclick="saveEdit()">Save</button>
           <button class="secondary" onclick="cancelEdit()">Cancel</button>
         </div>
@@ -169,6 +191,11 @@
           <div class="config-field"><label for="cfgChunkOverlap">Overlap</label><input type="number" id="cfgChunkOverlap" min="0" max="500" step="50"><span class="hint">0–500 chars</span></div>
           <div class="config-field"><label for="cfgSearchLimit">Search limit</label><input type="number" id="cfgSearchLimit" min="1" max="20"><span class="hint">1–20 results</span></div>
           <div class="config-field"><label for="cfgRerankCandidates">Rerank pool</label><input type="number" id="cfgRerankCandidates" min="10" max="200" step="10"><span class="hint">10–200 candidates</span></div>
+          <div class="config-field"><label for="cfgLabelMatchMode">Label match</label>
+            <select id="cfgLabelMatchMode" style="width:100px;flex-shrink:0"><option value="hard">hard</option><option value="boost">boost</option></select>
+            <span class="hint">hard=filter · boost=score-blend</span>
+          </div>
+          <div class="config-field"><label for="cfgLabelBoostWeight">Boost weight</label><input type="number" id="cfgLabelBoostWeight" min="0" max="1" step="0.05"><span class="hint">0–1 (label blend)</span></div>
           <small style="opacity:0.4;display:block;margin-top:0.3rem">Embedding: multi-qa-mpnet-base-cos-v1 · Cross-encoder: ms-marco-MiniLM-L-6-v2</small>
           <div class="config-actions"><button type="submit">Save</button><button type="button" class="secondary" onclick="resetConfig()">Defaults</button></div>
         </form>
@@ -180,9 +207,10 @@
 
   <!-- Endpoints -->
   <details>
-    <summary>📋 API Endpoints (12)</summary>
+    <summary>📋 API Endpoints (13)</summary>
     <article>
-      <div class="ep-row"><span class="ep-method get">GET</span><span class="ep-path">/search?q=&limit=</span><span class="ep-desc">Two-stage semantic search with cross-encoder reranking</span></div>
+      <div class="ep-row"><span class="ep-method get">GET</span><span class="ep-path">/search?q=&limit=&label=&label=</span><span class="ep-desc">Two-stage semantic search; multi-label (OR) with -prefix exclusion</span></div>
+      <div class="ep-row"><span class="ep-method get">GET</span><span class="ep-path">/labels</span><span class="ep-desc">List distinct labels (with URL counts) for chip-based search</span></div>
       <div class="ep-row"><span class="ep-method get">GET</span><span class="ep-path">/health</span><span class="ep-desc">Service readiness — Qdrant connectivity check</span></div>
       <div class="ep-row"><span class="ep-method post">POST</span><span class="ep-path">/ingest</span><span class="ep-desc">Start background re-crawl (409 if already running)</span></div>
       <div class="ep-row"><span class="ep-method get">GET</span><span class="ep-path">/ingest/status</span><span class="ep-desc">Current crawl progress (running/total/chunks)</span></div>
@@ -192,8 +220,8 @@
       <div class="ep-row"><span class="ep-method put">PUT</span><span class="ep-path">/urls/{id}</span><span class="ep-desc">Update URL string, label, or deep crawl settings</span></div>
       <div class="ep-row"><span class="ep-method delete">DEL</span><span class="ep-path">/urls/{id}</span><span class="ep-desc">Remove crawl URL</span></div>
       <div class="ep-row"><span class="ep-method get">GET</span><span class="ep-path">/config</span><span class="ep-desc">Get all configuration values</span></div>
-      <div class="ep-row"><span class="ep-method put">PUT</span><span class="ep-path">/config</span><span class="ep-desc">Update configuration (partial update supported)</span></div>
-      <div class="ep-row" style="border-bottom:none;margin-top:0.5rem;padding-top:0.5rem;border-top:2px solid var(--pico-primary)"><span class="ep-method" style="color:#f0a0ff">MCP</span><span class="ep-path">/mcp</span><span class="ep-desc">LLM agent tools: search_docs, add_url_to_crawl, trigger_crawl</span></div>
+      <div class="ep-row"><span class="ep-method put">PUT</span><span class="ep-path">/config</span><span class="ep-desc">Update configuration (label_match_mode: hard|boost, weight 0–1)</span></div>
+      <div class="ep-row" style="border-bottom:none;margin-top:0.5rem;padding-top:0.5rem;border-top:2px solid var(--pico-primary)"><span class="ep-method" style="color:#f0a0ff">MCP</span><span class="ep-path">/mcp</span><span class="ep-desc">LLM tools: list_labels, search_docs(labels=[]), add_url_to_crawl, trigger_crawl</span></div>
     </article>
   </details>
 
@@ -201,7 +229,7 @@
   <details>
     <summary>🤖 MCP Setup — Connect LLM Agents</summary>
     <article>
-      <p style="margin-bottom:0.75rem;opacity:0.7">Add this endpoint to your LLM client to enable semantic doc search from any agent. Three tools available: <code>search_docs</code>, <code>add_url_to_crawl</code>, <code>trigger_crawl</code>.</p>
+      <p style="margin-bottom:0.75rem;opacity:0.7">Add this endpoint to your LLM client to enable semantic doc search from any agent. Four tools available: <code>list_labels</code> (call this first to discover topics), <code>search_docs</code>, <code>add_url_to_crawl</code>, <code>trigger_crawl</code>.</p>
 
       <h3 style="font-size:0.95rem;margin-top:1rem">Claude Code</h3>
       <p>Create <code>.mcp.json</code> in your project root or add to <code>~/.claude/claude_desktop_config.json</code>:</p>
@@ -299,7 +327,7 @@ async function loadSummary() {
 
 // ─── URLs ────────────────────────────────────────────────────────
 async function loadUrls() {
-  loadLabels();  // keep dropdown in sync
+  loadLabels();  // keep chip autocomplete in sync
   const tb = document.getElementById('urlTbody');
   try {
     const urls = await (await fetch('/urls')).json();
@@ -307,14 +335,16 @@ async function loadUrls() {
     tb.innerHTML = urls.map(u => {
       const dc = u.deep_crawl ? `🔍 depth ${u.deep_crawl_max_depth || 3}` : '·';
       const patInfo = [u.deep_crawl_url_pattern, u.deep_crawl_exclude_pattern].filter(Boolean).join(' / ') || '';
+      const labelsArr = (u.labels && u.labels.length) ? u.labels : (u.label ? [u.label] : []);
+      const labelsText = labelsArr.length ? labelsArr.join(', ') : '—';
       return `<tr>
         <td><span class="url-col" title="${esc(u.url)}${patInfo?' — incl:'+esc(u.deep_crawl_url_pattern||'')+' excl:'+esc(u.deep_crawl_exclude_pattern||''):''}">${esc(trunc(u.url, 35))}</span></td>
-        <td>${esc(u.label||'—')}</td>
+        <td title="${esc(labelsText)}">${esc(trunc(labelsText, 30))}</td>
         <td style="font-size:0.72rem;max-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(patInfo)}">${dc}${patInfo?`<br><span style="opacity:0.5">${esc(trunc(patInfo,20))}</span>`:''}</td>
         <td><span class="badge badge-${u.status}">${u.status}</span></td>
         <td>${u.chunk_count ?? 0}</td>
         <td>
-          <button class="secondary btn-icon" onclick='startEdit(${u.id},"${esc(u.url)}","${esc(u.label||'')}",${u.deep_crawl||0},${u.deep_crawl_max_depth||3},"${esc(u.deep_crawl_url_pattern||'')}","${esc(u.deep_crawl_exclude_pattern||'')}")' title="Edit">✏️</button>
+          <button class="secondary btn-icon" onclick='startEdit(${u.id},"${esc(u.url)}","${esc(labelsText)}",${u.deep_crawl||0},${u.deep_crawl_max_depth||3},"${esc(u.deep_crawl_url_pattern||'')}","${esc(u.deep_crawl_exclude_pattern||'')}")' title="Edit">✏️</button>
           <button class="secondary btn-icon" style="color:var(--pico-del-color)" onclick="removeUrl(${u.id})" title="Delete">🗑</button>
         </td>
       </tr>`;
@@ -322,14 +352,22 @@ async function loadUrls() {
   } catch(e) { tb.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--pico-del-color)">Failed to load</td></tr>'; }
 }
 
+function _splitLabels(s) {
+  return (s || '').split(',').map(x => x.trim()).filter(Boolean);
+}
+
 async function addUrl() {
-  const u = document.getElementById('newUrl').value.trim(), l = document.getElementById('newLabel').value.trim();
+  const u = document.getElementById('newUrl').value.trim();
+  const lbls = _splitLabels(document.getElementById('newLabel').value);
   const dc = document.getElementById('newDeepCrawl').checked, dd = parseInt(document.getElementById('newDeepDepth').value) || 3;
   const up = document.getElementById('newDeepUrlPattern').value.trim(), ep = document.getElementById('newDeepExcludePattern').value.trim();
   if (!u) return;
   const el = document.getElementById('urlMsg');
   try {
-    const r = await fetch('/urls', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({url:u, label:l, deep_crawl:dc, deep_crawl_max_depth:dd, deep_crawl_url_pattern:up, deep_crawl_exclude_pattern:ep}) });
+    const body = {url:u, deep_crawl:dc, deep_crawl_max_depth:dd, deep_crawl_url_pattern:up, deep_crawl_exclude_pattern:ep};
+    if (lbls.length === 1) body.label = lbls[0];
+    else if (lbls.length > 1) body.labels = lbls;
+    const r = await fetch('/urls', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
     if (r.ok) { document.getElementById('newUrl').value=''; document.getElementById('newLabel').value=''; document.getElementById('newDeepCrawl').checked=false; document.getElementById('newDeepDepth').value=3; document.getElementById('newDeepUrlPattern').value=''; document.getElementById('newDeepExcludePattern').value=''; toggleNewDeepOptions(); loadUrls(); el.innerHTML='<mark style="background:#14532d;color:#4ade80">✓ Added</mark>'; }
     else { const d = await r.json(); el.innerHTML=`<mark style="background:#450a0a;color:#f87171">✗ ${d.detail||'Error'}</mark>`; }
   } catch(e) { el.innerHTML=`<mark style="background:#450a0a;color:#f87171">✗ ${e.message}</mark>`; }
@@ -352,11 +390,16 @@ function startEdit(id, url, label, dc, dd, urlPat, exclPat) {
 function cancelEdit() { editingId = null; document.getElementById('editRow').classList.add('hidden'); document.getElementById('editDeepRow').classList.add('hidden'); }
 async function saveEdit() {
   if (!editingId) return;
-  const u = document.getElementById('editUrl').value.trim(), l = document.getElementById('editLabel').value.trim();
+  const u = document.getElementById('editUrl').value.trim();
+  const lbls = _splitLabels(document.getElementById('editLabel').value);
   const dc = document.getElementById('editDeepCrawl').checked, dd = parseInt(document.getElementById('editDeepDepth').value) || 3;
   const up = document.getElementById('editDeepUrlPattern').value.trim(), ep = document.getElementById('editDeepExcludePattern').value.trim();
   try {
-    const r = await fetch(`/urls/${editingId}`, { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({url:u||null, label:l||null, deep_crawl:dc, deep_crawl_max_depth:dd, deep_crawl_url_pattern:up||null, deep_crawl_exclude_pattern:ep||null}) });
+    const body = {url:u||null, deep_crawl:dc, deep_crawl_max_depth:dd, deep_crawl_url_pattern:up||null, deep_crawl_exclude_pattern:ep||null};
+    if (lbls.length === 1) body.label = lbls[0];
+    else if (lbls.length > 1) body.labels = lbls;
+    else body.labels = [];  // clear all
+    const r = await fetch(`/urls/${editingId}`, { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
     if (r.ok) { cancelEdit(); loadUrls(); }
     else { const d = await r.json(); alert(d.detail||'Error'); }
   } catch(e) { alert(e.message); }
@@ -371,46 +414,166 @@ async function loadConfig() {
     document.getElementById('cfgChunkOverlap').value = c.chunk_overlap;
     document.getElementById('cfgSearchLimit').value = c.search_limit;
     document.getElementById('cfgRerankCandidates').value = c.rerank_candidates;
+    document.getElementById('cfgLabelMatchMode').value = c.label_match_mode || 'hard';
+    document.getElementById('cfgLabelBoostWeight').value = c.label_boost_weight ?? 0.3;
     searchLimit = c.search_limit;
+    const hint = document.getElementById('labelModeHint');
+    if (c.label_match_mode === 'boost') {
+      hint.textContent = `Mode: boost (off-label docs may surface, weight=${c.label_boost_weight})`;
+    } else {
+      hint.textContent = 'Mode: hard filter (off-label docs excluded)';
+    }
   } catch(e) { console.error(e); }
 }
 async function saveConfig(e) {
   e.preventDefault();
-  const cfg = { chunk_max_chars: +document.getElementById('cfgChunkMaxChars').value, chunk_overlap: +document.getElementById('cfgChunkOverlap').value, search_limit: +document.getElementById('cfgSearchLimit').value, rerank_candidates: +document.getElementById('cfgRerankCandidates').value };
+  const cfg = {
+    chunk_max_chars: +document.getElementById('cfgChunkMaxChars').value,
+    chunk_overlap: +document.getElementById('cfgChunkOverlap').value,
+    search_limit: +document.getElementById('cfgSearchLimit').value,
+    rerank_candidates: +document.getElementById('cfgRerankCandidates').value,
+    label_match_mode: document.getElementById('cfgLabelMatchMode').value,
+    label_boost_weight: +document.getElementById('cfgLabelBoostWeight').value,
+  };
   searchLimit = cfg.search_limit;
   const el = document.getElementById('configMsg');
   try {
     const r = await fetch('/config', { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(cfg) });
-    if (r.ok) { el.innerHTML = '<mark style="background:#14532d;color:#4ade80">✓ Saved — re-ingest to apply chunk changes</mark>'; }
+    if (r.ok) { el.innerHTML = '<mark style="background:#14532d;color:#4ade80">✓ Saved — re-ingest to apply chunk changes</mark>'; loadConfig(); }
     else { const d = await r.json(); el.innerHTML = `<mark style="background:#450a0a;color:#f87171">✗ ${d.detail||'Error'}</mark>`; }
   } catch(e) { el.innerHTML = `<mark style="background:#450a0a;color:#f87171">✗ ${e.message}</mark>`; }
   finally { el.classList.remove('hidden'); setTimeout(()=>el.classList.add('hidden'),5000); }
 }
-function resetConfig() { document.getElementById('cfgChunkMaxChars').value=2000; document.getElementById('cfgChunkOverlap').value=100; document.getElementById('cfgSearchLimit').value=7; document.getElementById('cfgRerankCandidates').value=50; saveConfig(new Event('submit')); }
+function resetConfig() {
+  document.getElementById('cfgChunkMaxChars').value=2000;
+  document.getElementById('cfgChunkOverlap').value=100;
+  document.getElementById('cfgSearchLimit').value=7;
+  document.getElementById('cfgRerankCandidates').value=50;
+  document.getElementById('cfgLabelMatchMode').value='hard';
+  document.getElementById('cfgLabelBoostWeight').value=0.3;
+  saveConfig(new Event('submit'));
+}
 
 // ─── Search ──────────────────────────────────────────────────────
 async function doSearch() {
   const q = document.getElementById('searchQuery').value.trim();
   if (!q) return;
-  const label = document.getElementById('searchLabel').value;
   const btn = document.getElementById('searchBtn'), results = document.getElementById('searchResults');
   btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>';
   try {
-    let url = `/search?q=${encodeURIComponent(q)}&limit=${searchLimit}`;
-    if (label) url += `&label=${encodeURIComponent(label)}`;
-    const data = await (await fetch(url)).json();
+    // Build label query params from chips: ?label=A&label=B&label=-X
+    const params = new URLSearchParams({ q, limit: searchLimit });
+    for (const sel of selectedLabels) {
+      params.append('label', sel.neg ? `-${sel.label}` : sel.label);
+    }
+    const data = await (await fetch(`/search?${params}`)).json();
     if (!data.length) { results.innerHTML = '<p style="opacity:0.4;text-align:center;padding:1rem">No results found.</p>'; return; }
     results.innerHTML = data.map(r => {
-      const ce = r.cross_encoder_score, cls = ce > 4 ? 'score-high' : ce > 2 ? 'score-mid' : 'score-low';
+      const ce = r.cross_encoder_score, cls = ce > 0.7 ? 'score-high' : ce > 0.3 ? 'score-mid' : 'score-low';
       const labelBadge = r.label ? `<span style="font-size:0.72rem;opacity:0.5">[${esc(r.label)}]</span>` : '';
+      const finalScore = r.final_score != null ? `<span>· Final ${r.final_score.toFixed(3)}</span>` : '';
       return `<article class="result-card">
-        <div class="result-meta">${labelBadge}<span>CE <strong class="${cls}">${ce.toFixed(3)}</strong></span><span>· Qdrant ${r.score.toFixed(3)}</span><span>· Chunk #${r.chunk_index}</span></div>
+        <div class="result-meta">${labelBadge}<span>CE <strong class="${cls}">${ce.toFixed(3)}</strong></span><span>· Qdrant ${r.score.toFixed(3)}</span>${finalScore}<span>· Chunk #${r.chunk_index}</span></div>
         <div class="result-content">${esc(r.content).substring(0,350)}${r.content.length>350?'…':''}</div>
         <div class="result-url">🔗 <a href="${esc(r.url)}" target="_blank">${esc(r.url)}</a></div>
       </article>`;
     }).join('');
   } catch(e) { results.innerHTML = `<p style="color:var(--pico-del-color)">Error: ${esc(e.message)}</p>`; }
   finally { btn.disabled = false; btn.innerHTML = 'Search'; }
+}
+
+// ─── Label chips ─────────────────────────────────────────────────
+let selectedLabels = [];   // [{label, neg}] — populated by addChip / removeChip
+let suggestFocus = -1;
+function initChipInput() {
+  const input = document.getElementById('chipInput');
+  const suggest = document.getElementById('chipSuggest');
+  input.addEventListener('input', () => renderSuggest(input.value));
+  input.addEventListener('keydown', (e) => {
+    const items = suggest.querySelectorAll('.chip-suggest-item');
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      if (suggestFocus >= 0 && items[suggestFocus]) items[suggestFocus].click();
+      else addChip(input.value);
+      input.value = ''; renderSuggest('');
+    } else if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      suggestFocus = Math.min(items.length - 1, suggestFocus + 1);
+      items.forEach((it, i) => it.classList.toggle('focused', i === suggestFocus));
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      suggestFocus = Math.max(-1, suggestFocus - 1);
+      items.forEach((it, i) => it.classList.toggle('focused', i === suggestFocus));
+    } else if (e.key === 'Escape') {
+      suggest.classList.add('hidden'); suggestFocus = -1;
+    } else if (e.key === 'Backspace' && input.value === '' && selectedLabels.length) {
+      removeChip(selectedLabels.length - 1);
+    }
+  });
+  document.addEventListener('click', (e) => {
+    if (!document.getElementById('chipWrap').contains(e.target)) {
+      suggest.classList.add('hidden'); suggestFocus = -1;
+    }
+  });
+}
+
+function renderSuggest(query) {
+  const suggest = document.getElementById('chipSuggest');
+  const input = document.getElementById('chipInput');
+  const q = query.trim().toLowerCase();
+  const neg = q.startsWith('-');
+  const term = neg ? q.slice(1) : q;
+  const used = new Set(selectedLabels.map(s => s.label.toLowerCase()));
+  const matches = knownLabels.filter(l => !used.has(l.toLowerCase()) && (!term || l.toLowerCase().includes(term)));
+  if (!q || !matches.length) {
+    suggest.classList.add('hidden'); suggestFocus = -1; return;
+  }
+  const rect = input.getBoundingClientRect();
+  suggest.style.top = (input.offsetTop + input.offsetHeight + 4) + 'px';
+  suggest.style.left = input.offsetLeft + 'px';
+  suggest.style.minWidth = input.offsetWidth + 'px';
+  suggest.innerHTML = matches.slice(0, 8).map((l, i) =>
+    `<div class="chip-suggest-item${i === 0 ? ' focused' : ''}" data-idx="${i}" data-label="${esc(l)}" data-neg="${neg}">${neg ? '−' : '+'}${esc(l)}</div>`
+  ).join('');
+  suggest.classList.remove('hidden');
+  suggestFocus = matches.length ? 0 : -1;
+  suggest.querySelectorAll('.chip-suggest-item').forEach(el => {
+    el.addEventListener('click', () => {
+      addChip(el.dataset.label, el.dataset.neg === 'true');
+      document.getElementById('chipInput').value = '';
+      suggest.classList.add('hidden'); suggestFocus = -1;
+    });
+  });
+}
+
+function addChip(label, neg) {
+  label = (label || '').trim();
+  if (!label) return;
+  // Allow user to type "-Foo" to exclude
+  if (label.startsWith('-')) { neg = true; label = label.slice(1).trim(); }
+  if (!label) return;
+  if (selectedLabels.some(s => s.label.toLowerCase() === label.toLowerCase())) return;
+  selectedLabels.push({ label, neg: !!neg });
+  renderChips();
+}
+
+function removeChip(idx) {
+  selectedLabels.splice(idx, 1);
+  renderChips();
+}
+
+function renderChips() {
+  const container = document.getElementById('labelChips');
+  const input = document.getElementById('chipInput');
+  // Remove all chips, keep the input
+  container.querySelectorAll('.chip').forEach(c => c.remove());
+  selectedLabels.forEach((s, i) => {
+    const chip = document.createElement('span');
+    chip.className = 'chip' + (s.neg ? ' neg' : '');
+    chip.innerHTML = `${s.neg ? '−' : '+'}${esc(s.label)}<span class="chip-x" title="Remove">×</span>`;
+    chip.querySelector('.chip-x').addEventListener('click', () => removeChip(i));
+    container.insertBefore(chip, input);
+  });
 }
 
 // ─── Deep crawl options toggle ────────────────────────────────────

@@ -180,7 +180,12 @@ async def run_ingest(on_progress=None) -> Dict:
                     print(f"  Empty page(s), skipped")
                     continue
 
-                # Chunk and embed all pages from this URL
+                # Chunk and embed all pages from this URL.
+                # Each chunk is replicated once per label in `url_entry["labels"]`
+                # so search filters by any one of the URL's labels match it.
+                url_labels = url_entry.get("labels") or ([label] if label else [])
+                if not url_labels:
+                    url_labels = [""]  # always store at least one copy (with empty label)
                 all_points = []
                 for page_idx, md_text in enumerate(markdowns):
                     if not md_text or not md_text.strip():
@@ -188,19 +193,20 @@ async def run_ingest(on_progress=None) -> Dict:
                     chunks = chunk_text(md_text, max_chars=max_chars, overlap=overlap)
                     for chunk_idx, chunk in enumerate(chunks):
                         embedding = model.encode(chunk).tolist()
-                        all_points.append(
-                            models.PointStruct(
-                                id=str(uuid.uuid4()),
-                                vector=embedding,
-                                payload={
-                                    "url": url,
-                                    "label": label,
-                                    "chunk_index": chunk_idx,
-                                    "page_index": page_idx if len(markdowns) > 1 else 0,
-                                    "content": chunk,
-                                },
+                        for lbl in url_labels:
+                            all_points.append(
+                                models.PointStruct(
+                                    id=str(uuid.uuid4()),
+                                    vector=embedding,
+                                    payload={
+                                        "url": url,
+                                        "label": lbl,
+                                        "chunk_index": chunk_idx,
+                                        "page_index": page_idx if len(markdowns) > 1 else 0,
+                                        "content": chunk,
+                                    },
+                                )
                             )
-                        )
 
                 if all_points:
                     await client.upsert(collection_name=COLLECTION_NAME, points=all_points)
