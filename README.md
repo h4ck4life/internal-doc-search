@@ -121,10 +121,16 @@ The server exposes an **MCP (Model Context Protocol)** endpoint at `/mcp/`. LLM 
 }
 ```
 
-**Option B — CLI (adds globally):**
+**Option B — CLI (add to this project):**
 
 ```bash
 claude mcp add --transport http doc-search http://localhost:8000/mcp/
+```
+
+**Option C — CLI (add globally, all projects):**
+
+```bash
+claude mcp --scope user add --transport http doc-search http://localhost:8000/mcp/
 ```
 
 ### Configure in Claude Desktop
