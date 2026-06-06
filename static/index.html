@@ -1,240 +1,457 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="dark">
+<html lang="en" class="bg-gray-950 text-gray-100">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Internal Doc Search</title>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2.0.6/css/pico.min.css">
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  tailwind.config = {
+    theme: {
+      extend: {
+        colors: {
+          surface: '#161b22',
+          border: '#30363d',
+          muted: '#8b949e',
+        }
+      }
+    }
+  }
+</script>
 <style>
-  :root { --pico-font-size: 14px; }
-  .container { max-width: 1200px; padding: 1rem; }
-  .app-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 1rem; flex-wrap: wrap; gap: 0.75rem; }
-  .app-header hgroup { margin: 0; }  .app-header h1 { margin: 0; }
-  .stats-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.75rem; margin-bottom: 1rem; }
-  .stat-card { text-align: center; padding: 0.75rem; background: var(--pico-card-background-color); border: 1px solid var(--pico-card-border-color); border-radius: var(--pico-border-radius); }
-  .stat-value { font-size: 1.4rem; font-weight: 700; line-height: 1.2; }
-  .stat-label { font-size: 0.7rem; text-transform: uppercase; opacity: 0.55; letter-spacing: 0.05em; }
-  .cols-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 1rem; }
-  details { margin-bottom: 0; }
-  details article { margin: 0; border-top-left-radius: 0; border-top-right-radius: 0; }
-  details[open] > summary { border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
-  details > summary { cursor: pointer; user-select: none; padding: 0.55rem 1rem; font-weight: 600; font-size: 0.95rem; background: var(--pico-card-background-color); border: 1px solid var(--pico-card-border-color); border-radius: var(--pico-border-radius); }
-  details > summary:hover { background: var(--pico-secondary-hover-background); }
-  details > article { border-top: none; }
+  /* ─── JS-dependent classes (used via innerHTML / classList / querySelector) ─── */
 
-  /* Forms */
-  .add-url-row { display: flex; gap: 0.5rem; align-items: flex-end; margin-bottom: 0.75rem; flex-wrap: wrap; }
-  .add-url-row input[type="url"] { flex: 2; min-width: 180px; }
-  .add-url-row input[type="text"] { flex: 1; min-width: 100px; }
-  .add-url-row button { flex-shrink: 0; }
-  .deep-row { display: flex; gap: 0.5rem; align-items: center; margin-bottom: 0.75rem; font-size: 0.82rem; }
-  .deep-row input[type="number"] { width: 70px; padding: 0.25rem 0.4rem; }
-  .deep-row label { margin: 0; display: flex; align-items: center; gap: 0.25rem; }
+  .hidden { display: none !important; }
 
-  /* Table */
-  .url-col { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
-  td .btn-icon { padding: 0.15rem 0.4rem; margin: 0 0.1rem; font-size: 0.75rem; }
-  .badge { display: inline-block; padding: 0.1rem 0.5rem; border-radius: 1rem; font-size: 0.7rem; font-weight: 600; text-align: center; min-width: 60px; }
-  .badge-completed { background: #14532d; color: #4ade80; }
-  .badge-pending { background: #3b2f00; color: #facc15; }
-  .badge-failed { background: #450a0a; color: #f87171; }
-  .badge-crawling { background: #1e3a5f; color: #6c8cff; }
+  /* Spinner */
+  .spinner {
+    display: inline-block; width: 1rem; height: 1rem;
+    border: 2px solid transparent; border-top-color: #58a6ff;
+    border-radius: 50%; animation: spin 0.6s linear infinite;
+    vertical-align: middle; margin-right: 0.3rem;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
 
-  /* Config */
-  .config-field { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.6rem; }
-  .config-field label { width: 130px; min-width: 130px; margin: 0; font-size: 0.85rem; }
-  .config-field input { width: 100px; flex-shrink: 0; }
-  .config-field .hint { font-size: 0.72rem; opacity: 0.45; flex-shrink: 0; }
-  .config-actions { display: flex; gap: 0.5rem; margin-top: 0.75rem; }
-
-  /* Search */
-  .result-card { margin-bottom: 0.5rem; }
-  .result-meta { font-size: 0.8rem; opacity: 0.65; margin-bottom: 0.4rem; display: flex; gap: 1rem; flex-wrap: wrap; }
-  .result-content { white-space: pre-wrap; font-size: 0.88rem; line-height: 1.55; }
-  .result-url { font-size: 0.78rem; margin-top: 0.4rem; word-break: break-all; }
-  .score-high { color: #4ade80; font-weight: 700; }  .score-mid { color: #facc15; font-weight: 700; }  .score-low { color: #f87171; font-weight: 700; }
-
-  /* Label chips */
-  .label-chips { display: flex; flex-wrap: wrap; gap: 0.3rem; align-items: center; margin-top: 0.4rem; min-height: 0.5rem; }
-  .chip { display: inline-flex; align-items: center; gap: 0.3rem; padding: 0.18rem 0.55rem; border-radius: 1rem; font-size: 0.78rem; font-weight: 500; background: #1e3a5f; color: #6c8cff; border: 1px solid #2a4d7a; cursor: default; }
+  /* Label chips (created dynamically in renderChips) */
+  .chip {
+    display: inline-flex; align-items: center; gap: 0.3rem;
+    padding: 0.15rem 0.55rem; border-radius: 9999px; font-size: 0.8rem;
+    font-weight: 500; background: #1e3a5f; color: #6c8cff;
+    border: 1px solid #2a4d7a; cursor: default;
+  }
   .chip.neg { background: #450a0a; color: #f87171; border-color: #7a2a2a; }
   .chip-x { cursor: pointer; opacity: 0.6; font-size: 0.9rem; line-height: 1; padding: 0 0.1rem; }
   .chip-x:hover { opacity: 1; }
-  .chip-input { flex: 1; min-width: 140px; border: none; outline: none; background: transparent; padding: 0.18rem 0.4rem; font-size: 0.85rem; color: var(--pico-color); }
-  .chip-input::placeholder { opacity: 0.4; }
-  .chip-wrap { background: var(--pico-card-background-color); border: 1px solid var(--pico-card-border-color); border-radius: var(--pico-border-radius); padding: 0.25rem 0.4rem; margin-top: 0.3rem; }
-  .chip-suggest { position: absolute; background: var(--pico-card-background-color); border: 1px solid var(--pico-card-border-color); border-radius: var(--pico-border-radius); max-height: 180px; overflow-y: auto; z-index: 50; min-width: 200px; box-shadow: 0 4px 12px rgba(0,0,0,0.4); }
+  .chip-suggest {
+    position: absolute; background: #161b22; border: 1px solid #30363d;
+    border-radius: 8px; max-height: 180px; overflow-y: auto; z-index: 50;
+    min-width: 200px; box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+  }
   .chip-suggest-item { padding: 0.35rem 0.6rem; cursor: pointer; font-size: 0.85rem; }
-  .chip-suggest-item:hover, .chip-suggest-item.focused { background: var(--pico-secondary-hover-background); }
+  .chip-suggest-item:hover, .chip-suggest-item.focused { background: rgba(255,255,255,0.06); }
   .chip-suggest-empty { padding: 0.35rem 0.6rem; opacity: 0.5; font-size: 0.8rem; }
 
-  /* Progress */
-  .progress-bar { height: 6px; background: var(--pico-muted-border-color); border-radius: 3px; margin: 0.5rem 0; overflow: hidden; }
-  .progress-fill { height: 100%; background: var(--pico-primary); border-radius: 3px; transition: width 0.3s; }
-  .progress-text { font-size: 0.8rem; opacity: 0.7; }
+  /* Status badges (created dynamically in loadUrls) */
+  .badge {
+    display: inline-block; padding: 0.1rem 0.5rem; border-radius: 9999px;
+    font-size: 0.7rem; font-weight: 600; text-align: center; min-width: 60px;
+  }
+  .badge-completed { background: #14532d; color: #4ade80; }
+  .badge-pending   { background: #3b2f00; color: #facc15; }
+  .badge-failed    { background: #450a0a; color: #f87171; }
+  .badge-crawling  { background: #1e3a5f; color: #6c8cff; }
 
-  /* Endpoints */
-  .ep-row { display: flex; gap: 1rem; font-size: 0.82rem; padding: 0.3rem 0; border-bottom: 1px solid var(--pico-muted-border-color); }
-  .ep-row:last-child { border-bottom: none; }
-  .ep-method { font-weight: 700; min-width: 55px; flex-shrink: 0; }
-  .ep-method.get { color: #4ade80; } .ep-method.post { color: #facc15; } .ep-method.put { color: #6c8cff; } .ep-method.delete { color: #f87171; }
-  .ep-path { font-family: var(--pico-font-family-monospace); font-size: 0.8rem; min-width: 155px; flex-shrink: 0; }
-  .ep-desc { opacity: 0.6; }
+  /* Scores (created dynamically in doSearch) */
+  .score-high { color: #4ade80; font-weight: 700; }
+  .score-mid  { color: #facc15; font-weight: 700; }
+  .score-low  { color: #f87171; font-weight: 700; }
 
-  .hidden { display: none !important; }
-  .spinner { display: inline-block; width: 1rem; height: 1rem; border: 2px solid transparent; border-top-color: var(--pico-primary); border-radius: 50%; animation: spin 0.6s linear infinite; vertical-align: middle; margin-right: 0.3rem; }
-  @keyframes spin { to { transform: rotate(360deg); } }
+  /* Progress bar (created dynamically in startPolling) */
+  .progress-bar    { height: 6px; background: #30363d; border-radius: 3px; margin: 0.5rem 0; overflow: hidden; }
+  .progress-fill   { height: 100%; background: #58a6ff; border-radius: 3px; transition: width 0.3s; }
+  .progress-text   { font-size: 0.8rem; opacity: 0.7; }
+
+  /* Table helpers (used in loadUrls innerHTML) */
+  .url-col { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
+  .btn-icon { padding: 0.15rem 0.4rem; margin: 0 0.1rem; font-size: 0.75rem; }
+
+  /* Search results (used in doSearch innerHTML) */
+  .result-content { white-space: pre-wrap; font-size: 0.88rem; line-height: 1.55; }
+  .result-meta    { font-size: 0.8rem; opacity: 0.65; margin-bottom: 0.4rem; }
+  .result-url     { font-size: 0.78rem; margin-top: 0.4rem; word-break: break-all; }
+
+  /* Status messages (toggled via classList) */
   .status-msg { font-size: 0.85rem; margin-top: 0.4rem; }
-  .status-msg mark { display: inline-block; padding: 0.15rem 0.6rem; border-radius: var(--pico-border-radius); }
-  @media (max-width: 768px) { .cols-2,.stats-row { grid-template-columns: 1fr 1fr; } .config-field{flex-wrap:wrap;gap:0.3rem} .config-field label{width:100%} .ep-row{flex-wrap:wrap;gap:0.2rem} .ep-desc{width:100%} }
+
+  /* Misc */
+  details > summary { cursor: pointer; user-select: none; }
+  details > summary::-webkit-details-marker { display: none; }
+  details > summary::marker { display: none; content: ''; }
+  input, select, button { font-family: inherit; }
 </style>
 </head>
-<body>
-<main class="container">
+<body class="min-h-screen">
 
-  <div class="app-header">
-    <hgroup>
-      <h1>🔍 Internal Doc Search</h1>
-      <p style="margin:0;opacity:0.5">Semantic search for your documentation</p>
-    </hgroup>
-    <button id="crawlBtnAll" onclick="triggerCrawl('all')" class="secondary">🔄 Recrawl All</button>
-    <button id="crawlBtnNew" onclick="triggerCrawl('new')">🆕 Recrawl New</button>
+<main class="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+
+  <!-- ─── Header ──────────────────────────────────────────────── -->
+  <div class="flex justify-between items-start flex-wrap gap-4 mb-6">
+    <div>
+      <h1 class="text-2xl font-bold tracking-tight">🔍 Internal Doc Search</h1>
+      <p class="text-sm text-muted mt-0.5">Semantic search for your documentation</p>
+    </div>
+    <div class="flex gap-2 flex-shrink-0">
+      <button id="crawlBtnNew" onclick="triggerCrawl('new')"
+              class="px-4 py-2 text-sm font-medium rounded-lg bg-blue-600 hover:bg-blue-500 transition-colors">
+        🆕 Recrawl New
+      </button>
+      <button id="crawlBtnAll" onclick="triggerCrawl('all')"
+              class="px-4 py-2 text-sm font-medium rounded-lg border border-gray-600 text-gray-300 hover:bg-gray-800 transition-colors">
+        🔄 Recrawl All
+      </button>
+    </div>
   </div>
 
   <div id="crawlMsg" class="status-msg hidden"></div>
 
-  <!-- Stats -->
-  <div class="stats-row">
-    <div class="stat-card"><div class="stat-value" id="statUrls">-</div><div class="stat-label">URLs</div></div>
-    <div class="stat-card"><div class="stat-value" id="statCrawled">-</div><div class="stat-label">Crawled</div></div>
-    <div class="stat-card"><div class="stat-value" id="statChunks">-</div><div class="stat-label">Chunks</div></div>
-    <div class="stat-card"><div class="stat-value" id="statLastCrawl">-</div><div class="stat-label">Last Crawl</div></div>
+  <!-- ─── Stats Row ───────────────────────────────────────────── -->
+  <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
+    <div class="bg-surface border border-border rounded-xl p-4 text-center">
+      <div class="text-2xl font-bold" id="statUrls">-</div>
+      <div class="text-xs text-muted uppercase tracking-wider mt-0.5">URLs</div>
+    </div>
+    <div class="bg-surface border border-border rounded-xl p-4 text-center">
+      <div class="text-2xl font-bold" id="statCrawled">-</div>
+      <div class="text-xs text-muted uppercase tracking-wider mt-0.5">Crawled</div>
+    </div>
+    <div class="bg-surface border border-border rounded-xl p-4 text-center">
+      <div class="text-2xl font-bold" id="statChunks">-</div>
+      <div class="text-xs text-muted uppercase tracking-wider mt-0.5">Chunks</div>
+    </div>
+    <div class="bg-surface border border-border rounded-xl p-4 text-center">
+      <div class="text-sm font-bold" id="statLastCrawl">-</div>
+      <div class="text-xs text-muted uppercase tracking-wider mt-0.5">Last Crawl</div>
+    </div>
   </div>
 
-  <!-- Search -->
-  <article style="margin-bottom:1rem">
-    <h2 style="margin-top:0">🔎 Search</h2>
-    <div class="add-url-row">
-      <input type="search" id="searchQuery" placeholder='e.g. "How does OAuth token refresh work?"' onkeydown="if(event.key==='Enter')doSearch()" style="flex:3">
-      <button id="searchBtn" onclick="doSearch()">Search</button>
+  <!-- ─── Search ──────────────────────────────────────────────── -->
+  <div class="bg-surface border border-border rounded-xl p-5 mb-6">
+    <h2 class="text-lg font-semibold mb-3">🔎 Search</h2>
+    <div class="flex gap-2 items-stretch">
+      <input type="search" id="searchQuery" placeholder='e.g. "How does OAuth token refresh work?"'
+             onkeydown="if(event.key==='Enter')doSearch()"
+             class="flex-1 px-4 py-2.5 bg-gray-950 border border-border rounded-lg text-sm
+                    placeholder:text-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-600/50 focus:border-blue-500">
+      <button id="searchBtn" onclick="doSearch()"
+              class="px-5 py-2.5 text-sm font-medium rounded-lg bg-blue-600 hover:bg-blue-500 transition-colors flex-shrink-0">
+        Search
+      </button>
     </div>
-    <div class="chip-wrap" id="chipWrap" style="position:relative">
-      <div class="label-chips" id="labelChips">
-        <input type="text" id="chipInput" class="chip-input" placeholder="Filter by label (type label, prefix with - to exclude, Enter to add)…" autocomplete="off">
+
+    <!-- Label chips -->
+    <div id="chipWrap" class="relative mt-3" style="position:relative">
+      <div class="flex flex-wrap gap-1.5 items-center min-h-[2rem] bg-gray-950 border border-border rounded-lg px-3 py-1.5"
+           id="labelChips">
+        <input type="text" id="chipInput" class="flex-1 min-w-[140px] bg-transparent border-none outline-none
+               text-sm text-gray-100 placeholder:text-gray-500 py-0.5"
+               placeholder="Filter by label (type label, prefix with - to exclude, Enter to add)…" autocomplete="off">
       </div>
       <div id="chipSuggest" class="chip-suggest hidden"></div>
     </div>
-    <div style="font-size:0.72rem;opacity:0.5;margin-top:0.3rem">
+
+    <!-- Label mode hint -->
+    <div class="text-xs text-muted mt-2">
       <span id="labelModeHint">Mode: hard filter (off-label docs excluded)</span>
     </div>
-    <div id="searchResults" style="margin-top:0.75rem"></div>
-  </article>
 
-  <div class="cols-2">
+    <!-- Results -->
+    <div id="searchResults" class="mt-4 space-y-3"></div>
+  </div>
+
+  <!-- ─── Two-Column: URLs + Config ───────────────────────────── -->
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-5 mb-6">
 
     <!-- URLs -->
-    <details open>
-      <summary>🔗 URLs</summary>
-      <article>
-        <div class="add-url-row">
-          <input type="url" id="newUrl" placeholder="https://docs.example.com">
-          <input type="text" id="newLabel" placeholder="Labels (comma-separated, e.g. Auth, API)">
-          <button onclick="addUrl()">+ Add</button>
+    <details open class="bg-surface border border-border rounded-xl overflow-hidden">
+      <summary class="px-5 py-3 font-semibold text-sm hover:bg-white/5 transition-colors select-none">
+        🔗 URLs
+      </summary>
+      <div class="px-5 pb-5 border-t border-border">
+        <!-- Add URL form -->
+        <div class="flex flex-wrap gap-2 items-end mt-4">
+          <input type="url" id="newUrl" placeholder="https://docs.example.com"
+                 class="flex-[2] min-w-[160px] px-3 py-2 bg-gray-950 border border-border rounded-lg text-sm
+                        placeholder:text-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-600/50 focus:border-blue-500">
+          <input type="text" id="newLabel" placeholder="Labels (comma-separated, e.g. Auth, API)"
+                 class="flex-1 min-w-[100px] px-3 py-2 bg-gray-950 border border-border rounded-lg text-sm
+                        placeholder:text-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-600/50 focus:border-blue-500">
+          <button onclick="addUrl()"
+                  class="px-4 py-2 text-sm font-medium rounded-lg bg-blue-600 hover:bg-blue-500 transition-colors flex-shrink-0">
+            + Add
+          </button>
         </div>
-        <div class="deep-row">
-          <label><input type="checkbox" id="newDeepCrawl" onchange="toggleNewDeepOptions()"> Deep crawl</label>
-          <span style="opacity:0.5">max depth</span>
-          <input type="number" id="newDeepDepth" value="3" min="1" max="10">
+
+        <!-- Deep crawl options -->
+        <div class="flex flex-wrap gap-3 items-center mt-3 text-sm">
+          <label class="flex items-center gap-1.5 cursor-pointer">
+            <input type="checkbox" id="newDeepCrawl" onchange="toggleNewDeepOptions()" class="rounded">
+            Deep crawl
+          </label>
+          <span class="text-muted">max depth</span>
+          <input type="number" id="newDeepDepth" value="3" min="1" max="10"
+                 class="w-16 px-2 py-1.5 bg-gray-950 border border-border rounded-lg text-sm text-center
+                        focus:outline-none focus:ring-2 focus:ring-blue-600/50">
         </div>
-        <div id="newDeepOptions" class="hidden">
-          <div class="deep-row">
-            <span style="font-size:0.78rem;width:55px;flex-shrink:0;opacity:0.5">Include</span>
-            <input type="text" id="newDeepUrlPattern" placeholder="Wildcard, e.g. */docs/*" style="flex:1">
-            <span style="font-size:0.78rem;width:55px;flex-shrink:0;opacity:0.5">Exclude</span>
-            <input type="text" id="newDeepExcludePattern" placeholder="Regex, e.g. .*/api/.*" style="flex:1">
+        <div id="newDeepOptions" class="hidden mt-2">
+          <div class="flex flex-wrap gap-2 items-center">
+            <span class="text-xs text-muted w-12 flex-shrink-0">Include</span>
+            <input type="text" id="newDeepUrlPattern" placeholder="Wildcard, e.g. */docs/*"
+                   class="flex-1 px-3 py-2 bg-gray-950 border border-border rounded-lg text-sm
+                          placeholder:text-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-600/50">
+            <span class="text-xs text-muted w-12 flex-shrink-0">Exclude</span>
+            <input type="text" id="newDeepExcludePattern" placeholder="Regex, e.g. .*/api/.*"
+                   class="flex-1 px-3 py-2 bg-gray-950 border border-border rounded-lg text-sm
+                          placeholder:text-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-600/50">
           </div>
         </div>
+
         <div id="urlMsg" class="status-msg hidden"></div>
-        <div style="overflow-x:auto">
-          <table style="margin:0">
-            <thead><tr><th>URL</th><th>Label</th><th>Crawl</th><th>Status</th><th>Chunks</th><th></th></tr></thead>
-            <tbody id="urlTbody"><tr><td colspan="6" style="text-align:center;opacity:0.4">Loading...</td></tr></tbody>
+
+        <!-- URLs table -->
+        <div class="overflow-x-auto mt-3">
+          <table class="w-full text-sm">
+            <thead>
+              <tr class="border-b border-border text-muted text-xs uppercase tracking-wider">
+                <th class="text-left py-2 pr-2">URL</th>
+                <th class="text-left py-2 pr-2">Label</th>
+                <th class="text-left py-2 pr-2">Crawl</th>
+                <th class="text-left py-2 pr-2">Status</th>
+                <th class="text-left py-2 pr-2">Chunks</th>
+                <th class="text-left py-2"></th>
+              </tr>
+            </thead>
+            <tbody id="urlTbody">
+              <tr><td colspan="6" class="text-center text-muted py-4">Loading...</td></tr>
+            </tbody>
           </table>
         </div>
-        <div id="editRow" class="add-url-row hidden" style="margin-top:0.5rem;padding-top:0.5rem;border-top:1px solid var(--pico-muted-border-color)">
-          <input type="url" id="editUrl" placeholder="URL">
-          <input type="text" id="editLabel" placeholder="Labels (comma-separated)">
-          <button onclick="saveEdit()">Save</button>
-          <button class="secondary" onclick="cancelEdit()">Cancel</button>
+
+        <!-- Edit row -->
+        <div id="editRow" class="hidden flex flex-wrap gap-2 items-end mt-4 pt-4 border-t border-border">
+          <input type="url" id="editUrl" placeholder="URL"
+                 class="flex-[2] min-w-[160px] px-3 py-2 bg-gray-950 border border-border rounded-lg text-sm
+                        focus:outline-none focus:ring-2 focus:ring-blue-600/50">
+          <input type="text" id="editLabel" placeholder="Labels (comma-separated)"
+                 class="flex-1 min-w-[100px] px-3 py-2 bg-gray-950 border border-border rounded-lg text-sm
+                        focus:outline-none focus:ring-2 focus:ring-blue-600/50">
+          <button onclick="saveEdit()"
+                  class="px-4 py-2 text-sm font-medium rounded-lg bg-blue-600 hover:bg-blue-500 transition-colors">
+            Save
+          </button>
+          <button onclick="cancelEdit()"
+                  class="px-4 py-2 text-sm font-medium rounded-lg border border-gray-600 text-gray-300 hover:bg-gray-800 transition-colors">
+            Cancel
+          </button>
         </div>
-        <div id="editDeepRow" class="deep-row hidden" style="margin-top:0">
-          <label><input type="checkbox" id="editDeepCrawl" onchange="toggleEditDeepOptions()"> Deep crawl</label>
-          <span style="opacity:0.5">max depth</span>
-          <input type="number" id="editDeepDepth" value="3" min="1" max="10">
+        <div id="editDeepRow" class="hidden flex flex-wrap gap-3 items-center mt-2 text-sm">
+          <label class="flex items-center gap-1.5 cursor-pointer">
+            <input type="checkbox" id="editDeepCrawl" onchange="toggleEditDeepOptions()" class="rounded">
+            Deep crawl
+          </label>
+          <span class="text-muted">max depth</span>
+          <input type="number" id="editDeepDepth" value="3" min="1" max="10"
+                 class="w-16 px-2 py-1.5 bg-gray-950 border border-border rounded-lg text-sm text-center
+                        focus:outline-none focus:ring-2 focus:ring-blue-600/50">
         </div>
-        <div id="editDeepOptions" class="hidden">
-          <div class="deep-row">
-            <span style="font-size:0.78rem;width:55px;flex-shrink:0;opacity:0.5">Include</span>
-            <input type="text" id="editDeepUrlPattern" placeholder="Wildcard, e.g. */docs/*" style="flex:1">
-            <span style="font-size:0.78rem;width:55px;flex-shrink:0;opacity:0.5">Exclude</span>
-            <input type="text" id="editDeepExcludePattern" placeholder="Regex, e.g. .*/api/.*" style="flex:1">
+        <div id="editDeepOptions" class="hidden mt-2">
+          <div class="flex flex-wrap gap-2 items-center">
+            <span class="text-xs text-muted w-12 flex-shrink-0">Include</span>
+            <input type="text" id="editDeepUrlPattern" placeholder="Wildcard, e.g. */docs/*"
+                   class="flex-1 px-3 py-2 bg-gray-950 border border-border rounded-lg text-sm
+                          placeholder:text-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-600/50">
+            <span class="text-xs text-muted w-12 flex-shrink-0">Exclude</span>
+            <input type="text" id="editDeepExcludePattern" placeholder="Regex, e.g. .*/api/.*"
+                   class="flex-1 px-3 py-2 bg-gray-950 border border-border rounded-lg text-sm
+                          placeholder:text-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-600/50">
           </div>
         </div>
-      </article>
+      </div>
     </details>
 
     <!-- Config -->
-    <details>
-      <summary>⚙️ Configuration</summary>
-      <article>
-        <form id="configForm" onsubmit="saveConfig(event)">
-          <div class="config-field"><label for="cfgChunkMaxChars">Chunk size</label><input type="number" id="cfgChunkMaxChars" min="500" max="5000" step="100"><span class="hint">500–5000 chars</span></div>
-          <div class="config-field"><label for="cfgChunkOverlap">Overlap</label><input type="number" id="cfgChunkOverlap" min="0" max="500" step="50"><span class="hint">0–500 chars</span></div>
-          <div class="config-field"><label for="cfgSearchLimit">Search limit</label><input type="number" id="cfgSearchLimit" min="1" max="20"><span class="hint">1–20 results</span></div>
-          <div class="config-field"><label for="cfgRerankCandidates">Rerank pool</label><input type="number" id="cfgRerankCandidates" min="10" max="200" step="10"><span class="hint">10–200 candidates</span></div>
-          <div class="config-field"><label for="cfgLabelMatchMode">Label match</label>
-            <select id="cfgLabelMatchMode" style="width:100px;flex-shrink:0"><option value="hard">hard</option><option value="boost">boost</option></select>
-            <span class="hint">hard=filter · boost=score-blend</span>
+    <details class="bg-surface border border-border rounded-xl overflow-hidden">
+      <summary class="px-5 py-3 font-semibold text-sm hover:bg-white/5 transition-colors select-none">
+        ⚙️ Configuration
+      </summary>
+      <form id="configForm" onsubmit="saveConfig(event)" class="px-5 pb-5 border-t border-border">
+        <div class="space-y-3 mt-4">
+          <!-- Chunk size -->
+          <div class="flex flex-wrap items-center gap-3">
+            <label for="cfgChunkMaxChars" class="w-28 flex-shrink-0 text-sm">Chunk size</label>
+            <input type="number" id="cfgChunkMaxChars" min="500" max="5000" step="100"
+                   class="w-24 px-3 py-2 bg-gray-950 border border-border rounded-lg text-sm text-center
+                          focus:outline-none focus:ring-2 focus:ring-blue-600/50">
+            <span class="text-xs text-muted">500–5000 chars</span>
           </div>
-          <div class="config-field"><label for="cfgLabelBoostWeight">Boost weight</label><input type="number" id="cfgLabelBoostWeight" min="0" max="1" step="0.05"><span class="hint">0–1 (label blend)</span></div>
-          <small style="opacity:0.4;display:block;margin-top:0.3rem">Embedding: multi-qa-mpnet-base-cos-v1 · Cross-encoder: ms-marco-MiniLM-L-6-v2</small>
-          <div class="config-actions"><button type="submit">Save</button><button type="button" class="secondary" onclick="resetConfig()">Defaults</button></div>
-        </form>
+          <!-- Overlap -->
+          <div class="flex flex-wrap items-center gap-3">
+            <label for="cfgChunkOverlap" class="w-28 flex-shrink-0 text-sm">Overlap</label>
+            <input type="number" id="cfgChunkOverlap" min="0" max="500" step="50"
+                   class="w-24 px-3 py-2 bg-gray-950 border border-border rounded-lg text-sm text-center
+                          focus:outline-none focus:ring-2 focus:ring-blue-600/50">
+            <span class="text-xs text-muted">0–500 chars</span>
+          </div>
+          <!-- Search limit -->
+          <div class="flex flex-wrap items-center gap-3">
+            <label for="cfgSearchLimit" class="w-28 flex-shrink-0 text-sm">Search limit</label>
+            <input type="number" id="cfgSearchLimit" min="1" max="20"
+                   class="w-24 px-3 py-2 bg-gray-950 border border-border rounded-lg text-sm text-center
+                          focus:outline-none focus:ring-2 focus:ring-blue-600/50">
+            <span class="text-xs text-muted">1–20 results</span>
+          </div>
+          <!-- Rerank pool -->
+          <div class="flex flex-wrap items-center gap-3">
+            <label for="cfgRerankCandidates" class="w-28 flex-shrink-0 text-sm">Rerank pool</label>
+            <input type="number" id="cfgRerankCandidates" min="10" max="200" step="10"
+                   class="w-24 px-3 py-2 bg-gray-950 border border-border rounded-lg text-sm text-center
+                          focus:outline-none focus:ring-2 focus:ring-blue-600/50">
+            <span class="text-xs text-muted">10–200 candidates</span>
+          </div>
+          <!-- Label match mode -->
+          <div class="flex flex-wrap items-center gap-3">
+            <label for="cfgLabelMatchMode" class="w-28 flex-shrink-0 text-sm">Label match</label>
+            <select id="cfgLabelMatchMode"
+                    class="w-24 px-3 py-2 bg-gray-950 border border-border rounded-lg text-sm
+                           focus:outline-none focus:ring-2 focus:ring-blue-600/50">
+              <option value="hard">hard</option>
+              <option value="boost">boost</option>
+            </select>
+            <span class="text-xs text-muted">hard=filter · boost=score-blend</span>
+          </div>
+          <!-- Boost weight -->
+          <div class="flex flex-wrap items-center gap-3">
+            <label for="cfgLabelBoostWeight" class="w-28 flex-shrink-0 text-sm">Boost weight</label>
+            <input type="number" id="cfgLabelBoostWeight" min="0" max="1" step="0.05"
+                   class="w-24 px-3 py-2 bg-gray-950 border border-border rounded-lg text-sm text-center
+                          focus:outline-none focus:ring-2 focus:ring-blue-600/50">
+            <span class="text-xs text-muted">0–1 (label blend)</span>
+          </div>
+        </div>
+
+        <p class="text-xs text-muted mt-3">
+          Embedding: multi-qa-mpnet-base-cos-v1 · Cross-encoder: ms-marco-MiniLM-L-6-v2
+        </p>
+
+        <div class="flex gap-2 mt-3">
+          <button type="submit"
+                  class="px-4 py-2 text-sm font-medium rounded-lg bg-blue-600 hover:bg-blue-500 transition-colors">
+            Save
+          </button>
+          <button type="button" onclick="resetConfig()"
+                  class="px-4 py-2 text-sm font-medium rounded-lg border border-gray-600 text-gray-300 hover:bg-gray-800 transition-colors">
+            Defaults
+          </button>
+        </div>
+
         <div id="configMsg" class="status-msg hidden"></div>
-      </article>
+      </form>
     </details>
 
   </div>
 
-  <!-- Endpoints -->
-  <details>
-    <summary>📋 API Endpoints (13)</summary>
-    <article>
-      <div class="ep-row"><span class="ep-method get">GET</span><span class="ep-path">/search?q=&limit=&label=&label=</span><span class="ep-desc">Two-stage semantic search; multi-label (OR) with -prefix exclusion</span></div>
-      <div class="ep-row"><span class="ep-method get">GET</span><span class="ep-path">/labels</span><span class="ep-desc">List distinct labels (with URL counts) for chip-based search</span></div>
-      <div class="ep-row"><span class="ep-method get">GET</span><span class="ep-path">/health</span><span class="ep-desc">Service readiness — Qdrant connectivity check</span></div>
-      <div class="ep-row"><span class="ep-method post">POST</span><span class="ep-path">/ingest</span><span class="ep-desc">Start background re-crawl (409 if already running)</span></div>
-      <div class="ep-row"><span class="ep-method get">GET</span><span class="ep-path">/ingest/status</span><span class="ep-desc">Current crawl progress (running/total/chunks)</span></div>
-      <div class="ep-row"><span class="ep-method get">GET</span><span class="ep-path">/docs-summary</span><span class="ep-desc">URL count, chunk count, last crawl timestamp</span></div>
-      <div class="ep-row"><span class="ep-method get">GET</span><span class="ep-path">/urls</span><span class="ep-desc">List all configured crawl URLs with status</span></div>
-      <div class="ep-row"><span class="ep-method post">POST</span><span class="ep-path">/urls</span><span class="ep-desc">Add new crawl URL (deep_crawl, deep_crawl_max_depth)</span></div>
-      <div class="ep-row"><span class="ep-method put">PUT</span><span class="ep-path">/urls/{id}</span><span class="ep-desc">Update URL string, label, or deep crawl settings</span></div>
-      <div class="ep-row"><span class="ep-method delete">DEL</span><span class="ep-path">/urls/{id}</span><span class="ep-desc">Remove crawl URL</span></div>
-      <div class="ep-row"><span class="ep-method get">GET</span><span class="ep-path">/config</span><span class="ep-desc">Get all configuration values</span></div>
-      <div class="ep-row"><span class="ep-method put">PUT</span><span class="ep-path">/config</span><span class="ep-desc">Update configuration (label_match_mode: hard|boost, weight 0–1)</span></div>
-      <div class="ep-row" style="border-bottom:none;margin-top:0.5rem;padding-top:0.5rem;border-top:2px solid var(--pico-primary)"><span class="ep-method" style="color:#f0a0ff">MCP</span><span class="ep-path">/mcp</span><span class="ep-desc">LLM tools: list_labels, search_docs(labels=[]), add_url_to_crawl, trigger_crawl</span></div>
-    </article>
+  <!-- ─── API Endpoints ───────────────────────────────────────── -->
+  <details class="bg-surface border border-border rounded-xl overflow-hidden mb-6">
+    <summary class="px-5 py-3 font-semibold text-sm hover:bg-white/5 transition-colors select-none">
+      📋 API Endpoints (13)
+    </summary>
+    <div class="px-5 pb-5 border-t border-border divide-y divide-border">
+      <div class="flex flex-wrap gap-x-4 gap-y-1 py-2.5 text-sm">
+        <span class="font-bold w-12 flex-shrink-0 text-green-400">GET</span>
+        <span class="font-mono text-sm w-40 flex-shrink-0">/search?q=&limit=&label=</span>
+        <span class="text-muted">Two-stage semantic search; multi-label (OR) with -prefix exclusion</span>
+      </div>
+      <div class="flex flex-wrap gap-x-4 gap-y-1 py-2.5 text-sm">
+        <span class="font-bold w-12 flex-shrink-0 text-green-400">GET</span>
+        <span class="font-mono text-sm w-40 flex-shrink-0">/labels</span>
+        <span class="text-muted">List distinct labels (with URL counts) for chip-based search</span>
+      </div>
+      <div class="flex flex-wrap gap-x-4 gap-y-1 py-2.5 text-sm">
+        <span class="font-bold w-12 flex-shrink-0 text-green-400">GET</span>
+        <span class="font-mono text-sm w-40 flex-shrink-0">/health</span>
+        <span class="text-muted">Service readiness — Qdrant connectivity check</span>
+      </div>
+      <div class="flex flex-wrap gap-x-4 gap-y-1 py-2.5 text-sm">
+        <span class="font-bold w-12 flex-shrink-0 text-yellow-400">POST</span>
+        <span class="font-mono text-sm w-40 flex-shrink-0">/ingest</span>
+        <span class="text-muted">Start background re-crawl (409 if already running)</span>
+      </div>
+      <div class="flex flex-wrap gap-x-4 gap-y-1 py-2.5 text-sm">
+        <span class="font-bold w-12 flex-shrink-0 text-green-400">GET</span>
+        <span class="font-mono text-sm w-40 flex-shrink-0">/ingest/status</span>
+        <span class="text-muted">Current crawl progress (running/total/chunks)</span>
+      </div>
+      <div class="flex flex-wrap gap-x-4 gap-y-1 py-2.5 text-sm">
+        <span class="font-bold w-12 flex-shrink-0 text-green-400">GET</span>
+        <span class="font-mono text-sm w-40 flex-shrink-0">/docs-summary</span>
+        <span class="text-muted">URL count, chunk count, last crawl timestamp</span>
+      </div>
+      <div class="flex flex-wrap gap-x-4 gap-y-1 py-2.5 text-sm">
+        <span class="font-bold w-12 flex-shrink-0 text-green-400">GET</span>
+        <span class="font-mono text-sm w-40 flex-shrink-0">/urls</span>
+        <span class="text-muted">List all configured crawl URLs with status</span>
+      </div>
+      <div class="flex flex-wrap gap-x-4 gap-y-1 py-2.5 text-sm">
+        <span class="font-bold w-12 flex-shrink-0 text-yellow-400">POST</span>
+        <span class="font-mono text-sm w-40 flex-shrink-0">/urls</span>
+        <span class="text-muted">Add new crawl URL (deep_crawl, deep_crawl_max_depth)</span>
+      </div>
+      <div class="flex flex-wrap gap-x-4 gap-y-1 py-2.5 text-sm">
+        <span class="font-bold w-12 flex-shrink-0 text-blue-400">PUT</span>
+        <span class="font-mono text-sm w-40 flex-shrink-0">/urls/{id}</span>
+        <span class="text-muted">Update URL string, label, or deep crawl settings</span>
+      </div>
+      <div class="flex flex-wrap gap-x-4 gap-y-1 py-2.5 text-sm">
+        <span class="font-bold w-12 flex-shrink-0 text-red-400">DEL</span>
+        <span class="font-mono text-sm w-40 flex-shrink-0">/urls/{id}</span>
+        <span class="text-muted">Remove crawl URL</span>
+      </div>
+      <div class="flex flex-wrap gap-x-4 gap-y-1 py-2.5 text-sm">
+        <span class="font-bold w-12 flex-shrink-0 text-green-400">GET</span>
+        <span class="font-mono text-sm w-40 flex-shrink-0">/config</span>
+        <span class="text-muted">Get all configuration values</span>
+      </div>
+      <div class="flex flex-wrap gap-x-4 gap-y-1 py-2.5 text-sm">
+        <span class="font-bold w-12 flex-shrink-0 text-blue-400">PUT</span>
+        <span class="font-mono text-sm w-40 flex-shrink-0">/config</span>
+        <span class="text-muted">Update configuration (label_match_mode: hard|boost, weight 0–1)</span>
+      </div>
+      <div class="flex flex-wrap gap-x-4 gap-y-1 py-2.5 text-sm border-t-2 !border-blue-500/50 mt-2 pt-3">
+        <span class="font-bold w-12 flex-shrink-0 text-purple-400">MCP</span>
+        <span class="font-mono text-sm w-40 flex-shrink-0">/mcp</span>
+        <span class="text-muted">LLM tools: list_labels, search_docs(labels=[]), add_url_to_crawl, trigger_crawl</span>
+      </div>
+    </div>
   </details>
 
-  <!-- MCP Setup Guide -->
-  <details>
-    <summary>🤖 MCP Setup — Connect LLM Agents</summary>
-    <article>
-      <p style="margin-bottom:0.75rem;opacity:0.7">Add this endpoint to your LLM client to enable semantic doc search from any agent. Four tools available: <code>list_labels</code> (call this first to discover topics), <code>search_docs</code>, <code>add_url_to_crawl</code>, <code>trigger_crawl</code>.</p>
+  <!-- ─── MCP Setup Guide ─────────────────────────────────────── -->
+  <details class="bg-surface border border-border rounded-xl overflow-hidden mb-6">
+    <summary class="px-5 py-3 font-semibold text-sm hover:bg-white/5 transition-colors select-none">
+      🤖 MCP Setup — Connect LLM Agents
+    </summary>
+    <div class="px-5 pb-5 border-t border-border">
+      <p class="text-sm text-muted mt-4 mb-4">
+        Add this endpoint to your LLM client to enable semantic doc search from any agent.
+        Four tools: <code class="text-gray-300 bg-gray-800 px-1.5 py-0.5 rounded text-xs">list_labels</code>
+        (call first to discover topics),
+        <code class="text-gray-300 bg-gray-800 px-1.5 py-0.5 rounded text-xs">search_docs</code>,
+        <code class="text-gray-300 bg-gray-800 px-1.5 py-0.5 rounded text-xs">add_url_to_crawl</code>,
+        <code class="text-gray-300 bg-gray-800 px-1.5 py-0.5 rounded text-xs">trigger_crawl</code>.
+      </p>
 
-      <h3 style="font-size:0.95rem;margin-top:1rem">Claude Code</h3>
-      <p>Create <code>.mcp.json</code> in your project root or add to <code>~/.claude/claude_desktop_config.json</code>:</p>
-      <pre style="font-size:0.8rem;padding:0.5rem;border-radius:var(--pico-border-radius);background:var(--pico-code-background-color)"><code>{
+      <h3 class="text-base font-semibold mt-4 mb-2">Claude Code</h3>
+      <p class="text-sm text-muted mb-2">Create <code class="text-gray-300 bg-gray-800 px-1.5 py-0.5 rounded text-xs">.mcp.json</code>
+         in your project root or add to <code class="text-gray-300 bg-gray-800 px-1.5 py-0.5 rounded text-xs">~/.claude/claude_desktop_config.json</code>:</p>
+      <pre class="text-xs p-4 rounded-lg bg-gray-950 border border-border overflow-x-auto"><code>{
   "mcpServers": {
     "doc-search": {
       "type": "url",
@@ -243,23 +460,26 @@
   }
 }</code></pre>
 
-      <h3 style="font-size:0.95rem;margin-top:1rem">Claude Desktop</h3>
-      <p>Settings → Developer → MCP Servers → Add:</p>
-      <pre style="font-size:0.8rem;padding:0.5rem;border-radius:var(--pico-border-radius);background:var(--pico-code-background-color)"><code>{
+      <h3 class="text-base font-semibold mt-4 mb-2">Claude Desktop</h3>
+      <p class="text-sm text-muted mb-2">Settings → Developer → MCP Servers → Add:</p>
+      <pre class="text-xs p-4 rounded-lg bg-gray-950 border border-border overflow-x-auto"><code>{
   "doc-search": {
     "type": "url",
     "url": "http://localhost:8000/mcp"
   }
 }</code></pre>
 
-      <h3 style="font-size:0.95rem;margin-top:1rem">Codex / Custom Client</h3>
-      <p>Any MCP-compatible client. Endpoint URL:</p>
-      <pre style="font-size:0.8rem;padding:0.5rem;border-radius:var(--pico-border-radius);background:var(--pico-code-background-color)"><code>http://localhost:8000/mcp</code></pre>
-    </article>
+      <h3 class="text-base font-semibold mt-4 mb-2">Codex / Custom Client</h3>
+      <p class="text-sm text-muted mb-2">Any MCP-compatible client. Endpoint URL:</p>
+      <pre class="text-xs p-4 rounded-lg bg-gray-950 border border-border overflow-x-auto"><code>http://localhost:8000/mcp</code></pre>
+    </div>
   </details>
 
 </main>
 
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!--  JavaScript — preserved EXACTLY as-is from original             -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
 <script>
 let searchLimit = 7, pollTimer = null, knownLabels = [];
 addEventListener('DOMContentLoaded', () => { loadSummary(); loadUrls(); loadConfig(); loadLabels(); initChipInput(); });
@@ -358,12 +578,12 @@ async function loadUrls() {
         <td><span class="badge badge-${u.status}">${u.status}</span></td>
         <td>${u.chunk_count ?? 0}</td>
         <td>
-          <button class="secondary btn-icon" onclick='startEdit(${u.id},"${esc(u.url)}","${esc(labelsText)}",${u.deep_crawl||0},${u.deep_crawl_max_depth||3},"${esc(u.deep_crawl_url_pattern||'')}","${esc(u.deep_crawl_exclude_pattern||'')}")' title="Edit">✏️</button>
-          <button class="secondary btn-icon" style="color:var(--pico-del-color)" onclick="removeUrl(${u.id})" title="Delete">🗑</button>
+          <button class="btn-icon border border-gray-600 text-gray-300 hover:bg-gray-700 rounded transition-colors" onclick='startEdit(${u.id},"${esc(u.url)}","${esc(labelsText)}",${u.deep_crawl||0},${u.deep_crawl_max_depth||3},"${esc(u.deep_crawl_url_pattern||'')}","${esc(u.deep_crawl_exclude_pattern||'')}")' title="Edit">✏️</button>
+          <button class="btn-icon border border-gray-600 text-red-400 hover:bg-red-900/30 rounded transition-colors" onclick="removeUrl(${u.id})" title="Delete">🗑</button>
         </td>
       </tr>`;
     }).join('');
-  } catch(e) { tb.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--pico-del-color)">Failed to load</td></tr>'; }
+  } catch(e) { tb.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#f87171">Failed to load</td></tr>'; }
 }
 
 function _splitLabels(s) {
@@ -488,13 +708,13 @@ async function doSearch() {
       const ce = r.cross_encoder_score, cls = ce > 0.7 ? 'score-high' : ce > 0.3 ? 'score-mid' : 'score-low';
       const labelBadge = r.label ? `<span style="font-size:0.72rem;opacity:0.5">[${esc(r.label)}]</span>` : '';
       const finalScore = r.final_score != null ? `<span>· Final ${r.final_score.toFixed(3)}</span>` : '';
-      return `<article class="result-card">
+      return `<article class="result-card bg-gray-950/50 border border-border rounded-lg p-4">
         <div class="result-meta">${labelBadge}<span>CE <strong class="${cls}">${ce.toFixed(3)}</strong></span><span>· Qdrant ${r.score.toFixed(3)}</span>${finalScore}<span>· Chunk #${r.chunk_index}</span></div>
         <div class="result-content">${esc(r.content)}</div>
-        <div class="result-url">🔗 <a href="${esc(r.url)}" target="_blank">${esc(r.url)}</a></div>
+        <div class="result-url">🔗 <a href="${esc(r.url)}" target="_blank" class="text-blue-400 hover:underline">${esc(r.url)}</a></div>
       </article>`;
     }).join('');
-  } catch(e) { results.innerHTML = `<p style="color:var(--pico-del-color)">Error: ${esc(e.message)}</p>`; }
+  } catch(e) { results.innerHTML = `<p style="color:#f87171">Error: ${esc(e.message)}</p>`; }
   finally { btn.disabled = false; btn.innerHTML = 'Search'; }
 }
 
