@@ -101,6 +101,7 @@
     <h2 style="margin-top:0">🔎 Search</h2>
     <div class="add-url-row">
       <input type="search" id="searchQuery" placeholder='e.g. "How does OAuth token refresh work?"' onkeydown="if(event.key==='Enter')doSearch()" style="flex:3">
+      <select id="searchLabel" style="flex:1;min-width:120px"><option value="">All sources</option></select>
       <button id="searchBtn" onclick="doSearch()">Search</button>
     </div>
     <div id="searchResults" style="margin-top:0.75rem"></div>
@@ -118,9 +119,17 @@
           <button onclick="addUrl()">+ Add</button>
         </div>
         <div class="deep-row">
-          <label><input type="checkbox" id="newDeepCrawl"> Deep crawl</label>
+          <label><input type="checkbox" id="newDeepCrawl" onchange="toggleNewDeepOptions()"> Deep crawl</label>
           <span style="opacity:0.5">max depth</span>
           <input type="number" id="newDeepDepth" value="3" min="1" max="10">
+        </div>
+        <div id="newDeepOptions" class="hidden">
+          <div class="deep-row">
+            <span style="font-size:0.78rem;width:55px;flex-shrink:0;opacity:0.5">Include</span>
+            <input type="text" id="newDeepUrlPattern" placeholder="Wildcard, e.g. */docs/*" style="flex:1">
+            <span style="font-size:0.78rem;width:55px;flex-shrink:0;opacity:0.5">Exclude</span>
+            <input type="text" id="newDeepExcludePattern" placeholder="Regex, e.g. .*/api/.*" style="flex:1">
+          </div>
         </div>
         <div id="urlMsg" class="status-msg hidden"></div>
         <div style="overflow-x:auto">
@@ -136,9 +145,17 @@
           <button class="secondary" onclick="cancelEdit()">Cancel</button>
         </div>
         <div id="editDeepRow" class="deep-row hidden" style="margin-top:0">
-          <label><input type="checkbox" id="editDeepCrawl"> Deep crawl</label>
+          <label><input type="checkbox" id="editDeepCrawl" onchange="toggleEditDeepOptions()"> Deep crawl</label>
           <span style="opacity:0.5">max depth</span>
           <input type="number" id="editDeepDepth" value="3" min="1" max="10">
+        </div>
+        <div id="editDeepOptions" class="hidden">
+          <div class="deep-row">
+            <span style="font-size:0.78rem;width:55px;flex-shrink:0;opacity:0.5">Include</span>
+            <input type="text" id="editDeepUrlPattern" placeholder="Wildcard, e.g. */docs/*" style="flex:1">
+            <span style="font-size:0.78rem;width:55px;flex-shrink:0;opacity:0.5">Exclude</span>
+            <input type="text" id="editDeepExcludePattern" placeholder="Regex, e.g. .*/api/.*" style="flex:1">
+          </div>
         </div>
       </article>
     </details>
@@ -216,7 +233,15 @@
 
 <script>
 let searchLimit = 7, pollTimer = null;
-addEventListener('DOMContentLoaded', () => { loadSummary(); loadUrls(); loadConfig(); });
+addEventListener('DOMContentLoaded', () => { loadSummary(); loadUrls(); loadConfig(); loadLabels(); });
+
+async function loadLabels() {
+  try {
+    const labels = await (await fetch('/labels')).json();
+    const sel = document.getElementById('searchLabel');
+    sel.innerHTML = '<option value="">All sources</option>' + labels.map(l => `<option value="${esc(l)}">${esc(l)}</option>`).join('');
+  } catch(e) { /* non-critical */ }
+}
 
 // ─── Crawl (background + polling) ────────────────────────────────
 async function triggerCrawl() {
@@ -274,20 +299,22 @@ async function loadSummary() {
 
 // ─── URLs ────────────────────────────────────────────────────────
 async function loadUrls() {
+  loadLabels();  // keep dropdown in sync
   const tb = document.getElementById('urlTbody');
   try {
     const urls = await (await fetch('/urls')).json();
     if (!urls.length) { tb.innerHTML = '<tr><td colspan="6" style="text-align:center;opacity:0.4">No URLs yet. Add one above.</td></tr>'; return; }
     tb.innerHTML = urls.map(u => {
       const dc = u.deep_crawl ? `🔍 depth ${u.deep_crawl_max_depth || 3}` : '·';
+      const patInfo = [u.deep_crawl_url_pattern, u.deep_crawl_exclude_pattern].filter(Boolean).join(' / ') || '';
       return `<tr>
-        <td><span class="url-col" title="${esc(u.url)}">${esc(trunc(u.url, 40))}</span></td>
+        <td><span class="url-col" title="${esc(u.url)}${patInfo?' — incl:'+esc(u.deep_crawl_url_pattern||'')+' excl:'+esc(u.deep_crawl_exclude_pattern||''):''}">${esc(trunc(u.url, 35))}</span></td>
         <td>${esc(u.label||'—')}</td>
-        <td style="font-size:0.78rem">${dc}</td>
+        <td style="font-size:0.72rem;max-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(patInfo)}">${dc}${patInfo?`<br><span style="opacity:0.5">${esc(trunc(patInfo,20))}</span>`:''}</td>
         <td><span class="badge badge-${u.status}">${u.status}</span></td>
         <td>${u.chunk_count ?? 0}</td>
         <td>
-          <button class="secondary btn-icon" onclick='startEdit(${u.id},"${esc(u.url)}","${esc(u.label||'')}",${u.deep_crawl||0},${u.deep_crawl_max_depth||3})' title="Edit">✏️</button>
+          <button class="secondary btn-icon" onclick='startEdit(${u.id},"${esc(u.url)}","${esc(u.label||'')}",${u.deep_crawl||0},${u.deep_crawl_max_depth||3},"${esc(u.deep_crawl_url_pattern||'')}","${esc(u.deep_crawl_exclude_pattern||'')}")' title="Edit">✏️</button>
           <button class="secondary btn-icon" style="color:var(--pico-del-color)" onclick="removeUrl(${u.id})" title="Delete">🗑</button>
         </td>
       </tr>`;
@@ -298,23 +325,27 @@ async function loadUrls() {
 async function addUrl() {
   const u = document.getElementById('newUrl').value.trim(), l = document.getElementById('newLabel').value.trim();
   const dc = document.getElementById('newDeepCrawl').checked, dd = parseInt(document.getElementById('newDeepDepth').value) || 3;
+  const up = document.getElementById('newDeepUrlPattern').value.trim(), ep = document.getElementById('newDeepExcludePattern').value.trim();
   if (!u) return;
   const el = document.getElementById('urlMsg');
   try {
-    const r = await fetch('/urls', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({url:u, label:l, deep_crawl:dc, deep_crawl_max_depth:dd}) });
-    if (r.ok) { document.getElementById('newUrl').value=''; document.getElementById('newLabel').value=''; document.getElementById('newDeepCrawl').checked=false; document.getElementById('newDeepDepth').value=3; loadUrls(); el.innerHTML='<mark style="background:#14532d;color:#4ade80">✓ Added</mark>'; }
+    const r = await fetch('/urls', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({url:u, label:l, deep_crawl:dc, deep_crawl_max_depth:dd, deep_crawl_url_pattern:up, deep_crawl_exclude_pattern:ep}) });
+    if (r.ok) { document.getElementById('newUrl').value=''; document.getElementById('newLabel').value=''; document.getElementById('newDeepCrawl').checked=false; document.getElementById('newDeepDepth').value=3; document.getElementById('newDeepUrlPattern').value=''; document.getElementById('newDeepExcludePattern').value=''; toggleNewDeepOptions(); loadUrls(); el.innerHTML='<mark style="background:#14532d;color:#4ade80">✓ Added</mark>'; }
     else { const d = await r.json(); el.innerHTML=`<mark style="background:#450a0a;color:#f87171">✗ ${d.detail||'Error'}</mark>`; }
   } catch(e) { el.innerHTML=`<mark style="background:#450a0a;color:#f87171">✗ ${e.message}</mark>`; }
   finally { el.classList.remove('hidden'); setTimeout(()=>el.classList.add('hidden'),3000); }
 }
 
 let editingId = null;
-function startEdit(id, url, label, dc, dd) {
+function startEdit(id, url, label, dc, dd, urlPat, exclPat) {
   editingId = id;
   document.getElementById('editUrl').value = url;
   document.getElementById('editLabel').value = label;
   document.getElementById('editDeepCrawl').checked = !!dc;
   document.getElementById('editDeepDepth').value = dd || 3;
+  document.getElementById('editDeepUrlPattern').value = urlPat || '';
+  document.getElementById('editDeepExcludePattern').value = exclPat || '';
+  toggleEditDeepOptions();
   document.getElementById('editRow').classList.remove('hidden');
   document.getElementById('editDeepRow').classList.remove('hidden');
 }
@@ -323,8 +354,9 @@ async function saveEdit() {
   if (!editingId) return;
   const u = document.getElementById('editUrl').value.trim(), l = document.getElementById('editLabel').value.trim();
   const dc = document.getElementById('editDeepCrawl').checked, dd = parseInt(document.getElementById('editDeepDepth').value) || 3;
+  const up = document.getElementById('editDeepUrlPattern').value.trim(), ep = document.getElementById('editDeepExcludePattern').value.trim();
   try {
-    const r = await fetch(`/urls/${editingId}`, { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({url:u||null, label:l||null, deep_crawl:dc, deep_crawl_max_depth:dd}) });
+    const r = await fetch(`/urls/${editingId}`, { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({url:u||null, label:l||null, deep_crawl:dc, deep_crawl_max_depth:dd, deep_crawl_url_pattern:up||null, deep_crawl_exclude_pattern:ep||null}) });
     if (r.ok) { cancelEdit(); loadUrls(); }
     else { const d = await r.json(); alert(d.detail||'Error'); }
   } catch(e) { alert(e.message); }
@@ -360,21 +392,35 @@ function resetConfig() { document.getElementById('cfgChunkMaxChars').value=2000;
 async function doSearch() {
   const q = document.getElementById('searchQuery').value.trim();
   if (!q) return;
+  const label = document.getElementById('searchLabel').value;
   const btn = document.getElementById('searchBtn'), results = document.getElementById('searchResults');
   btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>';
   try {
-    const data = await (await fetch(`/search?q=${encodeURIComponent(q)}&limit=${searchLimit}`)).json();
+    let url = `/search?q=${encodeURIComponent(q)}&limit=${searchLimit}`;
+    if (label) url += `&label=${encodeURIComponent(label)}`;
+    const data = await (await fetch(url)).json();
     if (!data.length) { results.innerHTML = '<p style="opacity:0.4;text-align:center;padding:1rem">No results found.</p>'; return; }
     results.innerHTML = data.map(r => {
       const ce = r.cross_encoder_score, cls = ce > 4 ? 'score-high' : ce > 2 ? 'score-mid' : 'score-low';
+      const labelBadge = r.label ? `<span style="font-size:0.72rem;opacity:0.5">[${esc(r.label)}]</span>` : '';
       return `<article class="result-card">
-        <div class="result-meta"><span>CE <strong class="${cls}">${ce.toFixed(3)}</strong></span><span>· Qdrant ${r.score.toFixed(3)}</span><span>· Chunk #${r.chunk_index}</span></div>
+        <div class="result-meta">${labelBadge}<span>CE <strong class="${cls}">${ce.toFixed(3)}</strong></span><span>· Qdrant ${r.score.toFixed(3)}</span><span>· Chunk #${r.chunk_index}</span></div>
         <div class="result-content">${esc(r.content).substring(0,350)}${r.content.length>350?'…':''}</div>
         <div class="result-url">🔗 <a href="${esc(r.url)}" target="_blank">${esc(r.url)}</a></div>
       </article>`;
     }).join('');
   } catch(e) { results.innerHTML = `<p style="color:var(--pico-del-color)">Error: ${esc(e.message)}</p>`; }
   finally { btn.disabled = false; btn.innerHTML = 'Search'; }
+}
+
+// ─── Deep crawl options toggle ────────────────────────────────────
+function toggleNewDeepOptions() {
+  const show = document.getElementById('newDeepCrawl').checked;
+  document.getElementById('newDeepOptions').classList.toggle('hidden', !show);
+}
+function toggleEditDeepOptions() {
+  const show = document.getElementById('editDeepCrawl').checked;
+  document.getElementById('editDeepOptions').classList.toggle('hidden', !show);
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────

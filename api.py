@@ -54,11 +54,42 @@ async def app_lifespan(app: FastAPI):
     yield
 
 
-from fastmcp.utilities.lifespan import combine_lifespans
+def _combine_lifespans(*lifespans):
+    """Combine multiple ASGI lifespan context managers into one."""
+
+    @asynccontextmanager
+    async def combined(app: FastAPI):
+        async def run(ls):
+            async with ls(app):
+                yield
+
+        # Build a chain of context managers
+        gens = [ls(app) for ls in lifespans]
+        # Enter all, then yield, then exit all
+        exits = []
+        try:
+            for gen in gens:
+                await gen.__anext__()
+                exits.append(gen)
+            yield
+        finally:
+            for gen in reversed(exits):
+                try:
+                    await gen.__anext__()
+                except StopAsyncIteration:
+                    pass
+
+    return combined
+
+
 from mcp_server import mcp as mcp_app
 
-mcp_asgi = mcp_app.http_app(path="/mcp")
-app = FastAPI(title="Internal Doc Search", lifespan=combine_lifespans(app_lifespan, mcp_asgi.lifespan))
+mcp_asgi = mcp_app.streamable_http_app()
+mcp_asgi_lifespan = getattr(mcp_asgi, "lifespan", None)
+app = FastAPI(
+    title="Internal Doc Search",
+    lifespan=_combine_lifespans(app_lifespan, mcp_asgi_lifespan) if mcp_asgi_lifespan else app_lifespan,
+)
 
 # ─── Request/Response models ─────────────────────────────────────
 
@@ -68,6 +99,8 @@ class URLInput(BaseModel):
     label: str = ""
     deep_crawl: bool = False
     deep_crawl_max_depth: int = 3
+    deep_crawl_url_pattern: str = ""
+    deep_crawl_exclude_pattern: str = ""
 
 
 class URLUpdate(BaseModel):
@@ -75,6 +108,8 @@ class URLUpdate(BaseModel):
     label: Optional[str] = None
     deep_crawl: Optional[bool] = None
     deep_crawl_max_depth: Optional[int] = None
+    deep_crawl_url_pattern: Optional[str] = None
+    deep_crawl_exclude_pattern: Optional[str] = None
 
 
 # ─── Background ingest worker ────────────────────────────────────
@@ -110,8 +145,12 @@ async def _background_ingest():
 
 
 @app.get("/search")
-async def search(q: str = Query(...), limit: int = Query(default=5, ge=1, le=50)):
-    """Two-stage retrieval: bi-encoder recall → cross-encoder rerank."""
+async def search(q: str = Query(...), limit: int = Query(default=5, ge=1, le=50),
+                 label: str = Query(default="")):
+    """Two-stage retrieval: bi-encoder recall → cross-encoder rerank.
+
+    Optionally filter by label (source document set). Leave empty to search all docs.
+    """
     client = AsyncQdrantClient(url=QDRANT_URL, check_compatibility=False)
 
     try:
@@ -119,11 +158,20 @@ async def search(q: str = Query(...), limit: int = Query(default=5, ge=1, le=50)
 
         # Stage 1: Bi-encoder retrieval
         query_vector = bi_encoder.encode(q).tolist()
-        results = await client.query_points(
+        query_kwargs = dict(
             collection_name=COLLECTION_NAME,
             query=query_vector,
             limit=rerank_candidates,
         )
+        # Add label filter if specified
+        if label:
+            query_kwargs["query_filter"] = models.Filter(
+                must=[models.FieldCondition(
+                    key="label",
+                    match=models.MatchValue(value=label),
+                )]
+            )
+        results = await client.query_points(**query_kwargs)
 
         if not results.points:
             return []
@@ -149,6 +197,7 @@ async def search(q: str = Query(...), limit: int = Query(default=5, ge=1, le=50)
                 "score": point.score,
                 "cross_encoder_score": round(sigmoid(float(ce_score)), 4),
                 "url": point.payload.get("url"),
+                "label": point.payload.get("label", ""),
                 "chunk_index": point.payload.get("chunk_index"),
                 "content": content,
             })
@@ -232,11 +281,21 @@ async def get_urls():
     return list_urls()
 
 
+@app.get("/labels")
+async def get_labels():
+    """Return distinct labels from configured URLs for search dropdown."""
+    urls = list_urls()
+    labels = sorted({u["label"] for u in urls if u.get("label")})
+    return labels
+
+
 @app.post("/urls", status_code=201)
 async def create_url(body: URLInput):
     """Add a new crawl URL."""
     try:
-        return add_url(body.url, body.label, deep_crawl=body.deep_crawl, deep_crawl_max_depth=body.deep_crawl_max_depth)
+        return add_url(body.url, body.label, deep_crawl=body.deep_crawl, deep_crawl_max_depth=body.deep_crawl_max_depth,
+                       deep_crawl_url_pattern=body.deep_crawl_url_pattern,
+                       deep_crawl_exclude_pattern=body.deep_crawl_exclude_pattern)
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
 
@@ -251,6 +310,8 @@ async def update_url_endpoint(url_id: int, body: URLUpdate):
             label=body.label,
             deep_crawl=body.deep_crawl,
             deep_crawl_max_depth=body.deep_crawl_max_depth,
+            deep_crawl_url_pattern=body.deep_crawl_url_pattern,
+            deep_crawl_exclude_pattern=body.deep_crawl_exclude_pattern,
         )
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))

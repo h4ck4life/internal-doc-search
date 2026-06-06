@@ -37,7 +37,7 @@ def _ensure_imports():
 
 
 @mcp.tool()
-async def search_docs(query: str, limit: int = 5) -> list[dict]:
+async def search_docs(query: str, limit: int = 5, label: str = "") -> list[dict]:
     """Semantic search across crawled documentation.
 
     Uses two-stage retrieval: bi-encoder recall from Qdrant followed by
@@ -46,6 +46,7 @@ async def search_docs(query: str, limit: int = 5) -> list[dict]:
     Args:
         query: The search query (natural language question)
         limit: Maximum number of results (1-20, default 5)
+        label: Optional filter by source label (e.g. "Crawl4AI Docs")
 
     Returns:
         List of results with scores, content previews, and source URLs
@@ -61,11 +62,19 @@ async def search_docs(query: str, limit: int = 5) -> list[dict]:
         import math
 
         query_vector = bi.encode(query).tolist()
-        results = await client.query_points(
+        query_kwargs = dict(
             collection_name=COLLECTION_NAME,
             query=query_vector,
             limit=rerank_candidates,
         )
+        if label:
+            query_kwargs["query_filter"] = models.Filter(  # noqa: F821
+                must=[models.FieldCondition(
+                    key="label",
+                    match=models.MatchValue(value=label),
+                )]
+            )
+        results = await client.query_points(**query_kwargs)
 
         if not results.points:
             return []
@@ -85,6 +94,7 @@ async def search_docs(query: str, limit: int = 5) -> list[dict]:
                 "cross_encoder_score": round(1 / (1 + math.exp(-float(ce_score))), 4),
                 "qdrant_score": round(point.score, 4),
                 "url": point.payload.get("url"),
+                "label": point.payload.get("label", ""),
                 "chunk_index": point.payload.get("chunk_index"),
                 "content": content[:500],  # Truncate for LLM context
             })
@@ -101,6 +111,8 @@ async def add_url_to_crawl(
     label: str = "",
     deep_crawl: bool = False,
     deep_crawl_max_depth: int = 3,
+    deep_crawl_url_pattern: str = "",
+    deep_crawl_exclude_pattern: str = "",
 ) -> dict:
     """Add a documentation URL to the crawl queue.
 
@@ -112,6 +124,8 @@ async def add_url_to_crawl(
         label: Human-readable label (e.g., "Auth Docs")
         deep_crawl: Whether to recursively follow links (BFS)
         deep_crawl_max_depth: Max depth for deep crawl (1-10)
+        deep_crawl_url_pattern: Regex pattern to include URLs (e.g., ".*/docs/.*")
+        deep_crawl_exclude_pattern: Regex pattern to exclude URLs (e.g., ".*/api/.*")
 
     Returns:
         The created URL entry with its ID and status
@@ -119,7 +133,13 @@ async def add_url_to_crawl(
     _ensure_imports()
     init_db()  # noqa: F821
     try:
-        return add_url(url, label, deep_crawl=deep_crawl, deep_crawl_max_depth=deep_crawl_max_depth)  # noqa: F821
+        return add_url(  # noqa: F821
+            url, label,
+            deep_crawl=deep_crawl,
+            deep_crawl_max_depth=deep_crawl_max_depth,
+            deep_crawl_url_pattern=deep_crawl_url_pattern,
+            deep_crawl_exclude_pattern=deep_crawl_exclude_pattern,
+        )
     except ValueError as e:
         return {"error": str(e)}
 

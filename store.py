@@ -38,6 +38,8 @@ def init_db() -> None:
                 error_message TEXT,
                 deep_crawl INTEGER DEFAULT 0,
                 deep_crawl_max_depth INTEGER DEFAULT 3,
+                deep_crawl_url_pattern TEXT DEFAULT '',
+                deep_crawl_exclude_pattern TEXT DEFAULT '',
                 created_at TEXT NOT NULL
             );
 
@@ -52,6 +54,8 @@ def init_db() -> None:
         # Migrate: add deep_crawl columns if upgrading from old schema
         _migrate_add_column(conn, "urls", "deep_crawl", "INTEGER DEFAULT 0")
         _migrate_add_column(conn, "urls", "deep_crawl_max_depth", "INTEGER DEFAULT 3")
+        _migrate_add_column(conn, "urls", "deep_crawl_url_pattern", "TEXT DEFAULT ''")
+        _migrate_add_column(conn, "urls", "deep_crawl_exclude_pattern", "TEXT DEFAULT ''")
         conn.commit()
     finally:
         conn.close()
@@ -77,14 +81,17 @@ def _migrate_add_column(conn: sqlite3.Connection, table: str, column: str, col_d
 # ─── URL CRUD ────────────────────────────────────────────────────
 
 
-def add_url(url: str, label: str = "", deep_crawl: bool = False, deep_crawl_max_depth: int = 3) -> dict:
+def add_url(url: str, label: str = "", deep_crawl: bool = False, deep_crawl_max_depth: int = 3,
+            deep_crawl_url_pattern: str = "", deep_crawl_exclude_pattern: str = "") -> dict:
     """Add a URL to crawl. Returns the created row as dict."""
     conn = _get_conn()
     try:
         cur = conn.execute(
-            "INSERT INTO urls (url, label, status, deep_crawl, deep_crawl_max_depth, created_at) "
-            "VALUES (?, ?, 'pending', ?, ?, ?)",
-            (url, label, int(deep_crawl), deep_crawl_max_depth, _now_iso()),
+            "INSERT INTO urls (url, label, status, deep_crawl, deep_crawl_max_depth, "
+            "deep_crawl_url_pattern, deep_crawl_exclude_pattern, created_at) "
+            "VALUES (?, ?, 'pending', ?, ?, ?, ?, ?)",
+            (url, label, int(deep_crawl), deep_crawl_max_depth,
+             deep_crawl_url_pattern, deep_crawl_exclude_pattern, _now_iso()),
         )
         conn.commit()
         row = conn.execute("SELECT * FROM urls WHERE id = ?", (cur.lastrowid,)).fetchone()
@@ -113,6 +120,8 @@ def update_url(
     label: Optional[str] = None,
     deep_crawl: Optional[bool] = None,
     deep_crawl_max_depth: Optional[int] = None,
+    deep_crawl_url_pattern: Optional[str] = None,
+    deep_crawl_exclude_pattern: Optional[str] = None,
 ) -> Optional[dict]:
     """Update a URL. Returns updated row or None if not found."""
     conn = _get_conn()
@@ -125,10 +134,14 @@ def update_url(
         new_label = label if label is not None else existing["label"]
         new_dc = int(deep_crawl) if deep_crawl is not None else existing["deep_crawl"]
         new_dc_depth = deep_crawl_max_depth if deep_crawl_max_depth is not None else existing["deep_crawl_max_depth"]
+        new_dc_url_pat = deep_crawl_url_pattern if deep_crawl_url_pattern is not None else existing["deep_crawl_url_pattern"]
+        new_dc_excl_pat = deep_crawl_exclude_pattern if deep_crawl_exclude_pattern is not None else existing["deep_crawl_exclude_pattern"]
 
         conn.execute(
-            "UPDATE urls SET url=?, label=?, deep_crawl=?, deep_crawl_max_depth=? WHERE id=?",
-            (new_url, new_label, new_dc, new_dc_depth, url_id),
+            "UPDATE urls SET url=?, label=?, deep_crawl=?, deep_crawl_max_depth=?, "
+            "deep_crawl_url_pattern=?, deep_crawl_exclude_pattern=? WHERE id=?",
+            (new_url, new_label, new_dc, new_dc_depth,
+             new_dc_url_pat, new_dc_excl_pat, url_id),
         )
         conn.commit()
         row = conn.execute("SELECT * FROM urls WHERE id = ?", (url_id,)).fetchone()

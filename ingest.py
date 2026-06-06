@@ -2,11 +2,13 @@
 
 import asyncio
 import os
+import re
 import uuid
 from typing import Dict, List, Optional
 
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
 from crawl4ai.deep_crawling import BFSDeepCrawlStrategy
+from crawl4ai.deep_crawling.filters import FilterChain, URLPatternFilter
 from qdrant_client import AsyncQdrantClient, models
 from sentence_transformers import SentenceTransformer
 
@@ -42,26 +44,59 @@ async def _ensure_collection(client: AsyncQdrantClient) -> None:
         )
 
 
+def _wildcard_match(url: str, pattern: str) -> bool:
+    """Simple glob-style wildcard match for URL filtering.
+    Supports * as wildcard. Case-insensitive.
+    """
+    # Convert glob pattern to regex: escape regex chars, then replace \* with .*
+    regex_pat = re.escape(pattern).replace(r"\*", ".*")
+    return re.search(regex_pat, url, re.IGNORECASE) is not None
+
+
 async def _crawl_single_url(
     crawler: AsyncWebCrawler,
     url: str,
     deep_crawl: bool,
     max_depth: int,
+    url_pattern: str = "",
+    exclude_pattern: str = "",
 ) -> List[str]:
-    """Crawl a URL. Returns list of markdown strings (one per page)."""
+    """Crawl a URL. Returns list of markdown strings (one per page).
+
+    url_pattern: comma-separated wildcard patterns for URLPatternFilter (e.g. "*/docs/*,*/guide/*")
+    exclude_pattern: comma-separated URL substrings to exclude from results
+    """
     if deep_crawl:
+        strategy_kwargs = {
+            "max_depth": max_depth,
+            "include_external": False,
+        }
+        filters = []
+        if url_pattern:
+            # Split comma-separated wildcard patterns
+            patterns = [p.strip() for p in url_pattern.split(",") if p.strip()]
+            if patterns:
+                filters.append(URLPatternFilter(patterns=patterns))
+        if filters:
+            strategy_kwargs["filter_chain"] = FilterChain(filters)
+
         config = CrawlerRunConfig(
-            deep_crawl_strategy=BFSDeepCrawlStrategy(
-                max_depth=max_depth,
-                include_external=False,
-            ),
+            deep_crawl_strategy=BFSDeepCrawlStrategy(**strategy_kwargs),
             cache_mode=CacheMode.BYPASS,
         )
         results = await crawler.arun(url=url, config=config)
-        # BFS returns multiple results
+        # Build exclude pattern list (wildcard-style substring match)
+        excl_pats = []
+        if exclude_pattern:
+            excl_pats = [p.strip() for p in exclude_pattern.split(",") if p.strip()]
+
         markdowns = []
         for r in results:
             if r.success:
+                result_url = getattr(r, "url", "") or ""
+                # Skip results whose URL matches any exclude pattern
+                if excl_pats and any(_wildcard_match(result_url, pat) for pat in excl_pats):
+                    continue
                 md = r.markdown
                 if isinstance(md, str):
                     markdowns.append(md)
@@ -115,15 +150,25 @@ async def run_ingest(on_progress=None) -> Dict:
             for url_entry in urls:
                 url_id = url_entry["id"]
                 url = url_entry["url"]
+                label = url_entry.get("label", "") or ""
                 deep_crawl = bool(url_entry.get("deep_crawl", 0))
                 max_depth = url_entry.get("deep_crawl_max_depth", 3)
+                url_pattern = url_entry.get("deep_crawl_url_pattern", "") or ""
+                exclude_pattern = url_entry.get("deep_crawl_exclude_pattern", "") or ""
 
                 update_url_status(url_id, "crawling")
                 crawl_type = f"deep (max_depth={max_depth})" if deep_crawl else "single page"
+                if url_pattern:
+                    crawl_type += f" include={url_pattern}"
+                if exclude_pattern:
+                    crawl_type += f" exclude={exclude_pattern}"
                 print(f"Crawling [{crawl_type}]: {url}")
 
                 try:
-                    markdowns = await _crawl_single_url(crawler, url, deep_crawl, max_depth)
+                    markdowns = await _crawl_single_url(
+                        crawler, url, deep_crawl, max_depth,
+                        url_pattern=url_pattern, exclude_pattern=exclude_pattern,
+                    )
                 except Exception as e:
                     update_url_status(url_id, "failed", error_message=str(e))
                     errors.append({"url": url, "error": str(e)})
@@ -149,6 +194,7 @@ async def run_ingest(on_progress=None) -> Dict:
                                 vector=embedding,
                                 payload={
                                     "url": url,
+                                    "label": label,
                                     "chunk_index": chunk_idx,
                                     "page_index": page_idx if len(markdowns) > 1 else 0,
                                     "content": chunk,
