@@ -108,8 +108,13 @@ class URLUpdate(BaseModel):
 # ─── Background ingest worker ────────────────────────────────────
 
 
-async def _background_ingest():
-    """Run ingest in background, updating _ingest_state as it progresses."""
+async def _background_ingest(mode: str = "all"):
+    """Run ingest in background, updating _ingest_state as it progresses.
+
+    Args:
+        mode: "all" — recrawl every URL (reset completed → pending first).
+              "new" — only crawl pending/failed URLs, skip completed.
+    """
     global _ingest_state
     try:
         from ingest import run_ingest
@@ -123,7 +128,7 @@ async def _background_ingest():
                 "message": f"{current}/{total} — {label}",
             })
 
-        result = await run_ingest(on_progress=on_progress)
+        result = await run_ingest(on_progress=on_progress, only_pending=(mode == "new"))
         _ingest_state["status"] = "completed"
         _ingest_state["message"] = f"{result['urls_crawled']} URLs, {result['chunks_stored']} chunks"
         _ingest_state["current_url"] = _ingest_state["total_urls"]
