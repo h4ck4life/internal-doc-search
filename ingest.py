@@ -344,6 +344,16 @@ async def run_ingest(on_progress=None, only_pending: bool = False) -> Dict:
                 if all_points:
                     await client.upsert(collection_name=COLLECTION_NAME, points=all_points)
 
+                # Mark discovered pages as completed (they were registered as pending)
+                if deep_crawl:
+                    for page_url, _ in pages:
+                        if page_url != url:
+                            # Find the auto-registered row and mark it completed
+                            existing = [u for u in list_urls() if u["url"] == page_url]
+                            if existing:
+                                update_url_status(existing[0]["id"], "completed",
+                                                  chunk_count=existing[0].get("chunk_count", 0))
+
                 update_url_status(url_id, "completed", chunk_count=len(all_points))
                 total_urls += 1
                 total_chunks += len(all_points)

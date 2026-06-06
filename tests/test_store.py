@@ -215,7 +215,7 @@ def test_add_discovered_url_creates_row(temp_db):
     assert child is not None
     assert child["url"] == "https://example.com/child"
     assert child["parent_url_id"] == seed["id"]
-    assert child["status"] == "completed"
+    assert child["status"] == "pending"  # registered as pending, marked completed after chunk upsert
     assert set(child["labels"]) == {"Auth", "API"}
 
 

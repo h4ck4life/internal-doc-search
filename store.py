@@ -204,7 +204,8 @@ def add_discovered_url(
     INSERT OR IGNORE — if the URL already exists (e.g. discovered by
     another seed), return the existing row unchanged.
     The discovered URL inherits labels + deep crawl config from its parent.
-    Status is set to 'completed' since it was just crawled.
+    Status is set to 'pending' — the caller marks it 'completed'
+    after chunks are stored successfully.
 
     Args:
         url: The discovered page URL.
@@ -226,7 +227,7 @@ def add_discovered_url(
             "(url, label, status, deep_crawl, deep_crawl_max_depth, "
             "deep_crawl_url_pattern, deep_crawl_exclude_pattern, "
             "parent_url_id, created_at) "
-            "VALUES (?, ?, 'completed', ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?)",
             (url, primary, int(deep_crawl), deep_crawl_max_depth,
              deep_crawl_url_pattern, deep_crawl_exclude_pattern,
              parent_id, _now_iso()),
