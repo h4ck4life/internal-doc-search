@@ -451,12 +451,13 @@ async def update_config_endpoint(body: dict):
 # "/mcp" prefix, residual "" is normalized to "/", matching the sub-app's
 # route. Static is at /static (NOT /) — a / mount would match ALL path
 # prefixes and block the /mcp mount (Starlette picks first mount, not most-
-# specific, and both match /mcp).
+# specific, and both match /mcp). Dashboard is served at / via FileResponse.
 app.mount("/mcp", mcp_asgi)
 app.mount("/static", StaticFiles(directory="static", html=True), name="static")
 
-# Root redirect: / → /static/ so user doesn't see 404 on the home page.
+# Serve dashboard directly at / — FileResponse avoids the redirect dance.
+# Static mount is kept at /static for any additional assets.
 @app.get("/")
 async def root():
-    from starlette.responses import RedirectResponse
-    return RedirectResponse(url="/static/")
+    from starlette.responses import FileResponse
+    return FileResponse("static/index.html")
