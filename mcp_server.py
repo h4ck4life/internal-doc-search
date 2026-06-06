@@ -152,8 +152,13 @@ async def list_labels() -> list[dict]:
 
 
 @mcp.tool()
-async def search_docs(query: str, limit: int = 5, labels: Optional[list[str]] = None) -> list[dict]:
+async def search_docs(query: str, limit: int = 5, labels: Optional[list[str]] = None) -> dict:
     """Semantic search across crawled documentation with two-stage retrieval.
+
+    IMPORTANT — if results have low cross_encoder_score (< 0.3), the documents
+    may be in a different language than your query. Call list_labels() to see
+    what topics/languages are available, translate your query to match, and
+    search again with the appropriate labels filter.
 
     Tip: If the question is topic-specific, call list_labels() first, then pass
     the matching label(s) here to scope results.
@@ -169,12 +174,17 @@ async def search_docs(query: str, limit: int = 5, labels: Optional[list[str]] = 
             - Comma-separated strings also accepted: ["Auth, Pricing"].
 
     Returns:
-        List of results with cross-encoder scores, content previews, and URLs.
+        Dict with "results" list and an optional "_hint" when relevance is low.
+        Each result has cross-encoder score, content preview, URL, and label.
     """
     _ensure_imports()
 
-    bi = SentenceTransformer("multi-qa-mpnet-base-cos-v1")  # noqa: F811
-    ce = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")  # noqa: F811
+    # Reuse the module-level encoder singletons from api.py — they are loaded
+    # once at startup (lifespan) and cached. Creating new SentenceTransformer /
+    # CrossEncoder instances on every call would load 400MB+ weights each time,
+    # which causes the "Loading weights" log lines on every request.
+    from api import bi_encoder, cross_encoder
+
     client = AsyncQdrantClient(url=QDRANT_URL, check_compatibility=False)  # noqa: F811
 
     try:
@@ -183,7 +193,7 @@ async def search_docs(query: str, limit: int = 5, labels: Optional[list[str]] = 
         positive, negative = _parse_labels(labels)
         qfilter = _build_filter(positive, negative)
 
-        query_vector = bi.encode(query).tolist()
+        query_vector = bi_encoder.encode(query).tolist()
         query_kwargs = dict(
             collection_name=COLLECTION_NAME,
             query=query_vector,
@@ -194,11 +204,44 @@ async def search_docs(query: str, limit: int = 5, labels: Optional[list[str]] = 
         results = await client.query_points(**query_kwargs)
 
         if not results.points:
-            return []
+            return {"results": []}
 
         pairs = [(query, p.payload.get("content", "")) for p in results.points]
-        ce_scores = ce.predict(pairs)
-        return _normalize_scores(results.points, ce_scores, limit)
+        ce_scores = cross_encoder.predict(pairs)
+        normalized = _normalize_scores(results.points, ce_scores, limit)
+
+        # If the best result has a very low cross-encoder score, the corpus
+        # likely doesn't contain content in the query's language. Include a
+        # hint with available labels so the LLM can translate and re-search.
+        max_ce = max((r["cross_encoder_score"] for r in normalized), default=0)
+        response = {"results": normalized}
+        if max_ce < 0.3 and not (positive or negative):
+            # Query all labels so the LLM knows what topics/languages exist
+            label_agg: dict[str, int] = {}
+            offset = None
+            while True:
+                pts, offset = await client.scroll(
+                    collection_name=COLLECTION_NAME,
+                    offset=offset,
+                    limit=500,
+                    with_payload=["label"],
+                    with_vectors=False,
+                )
+                for p in pts:
+                    lbl = (p.payload.get("label") or "").strip()
+                    if lbl:
+                        label_agg[lbl] = label_agg.get(lbl, 0) + 1
+                if offset is None:
+                    break
+            available = sorted(label_agg.keys()) if label_agg else []
+            response["_hint"] = (
+                f"Best cross-encoder score is only {max_ce:.4f} — the corpus "
+                f"may not contain documents in the same language as your query "
+                f"'{query}'. Available labels (topics/languages): {available}. "
+                f"Try translating your query to match one of these labels and "
+                f"re-search with labels=[<label>]."
+            )
+        return response
     finally:
         await client.close()
 
