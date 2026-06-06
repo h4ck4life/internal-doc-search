@@ -91,7 +91,7 @@ def test_search_empty_collection(client):
     with patch("api.AsyncQdrantClient", return_value=mock_instance):
         response = client.get("/search?q=test+query")
         assert response.status_code == 200
-        assert response.json() == []
+        assert response.json() == {"results": []}
 
 
 def test_search_multi_label_builds_or_filter(client):
@@ -150,11 +150,12 @@ def test_search_boost_mode_blends_scores(client):
         response = client.get("/search?q=oauth&label=Auth&label_match_mode=boost")
         assert response.status_code == 200
         data = response.json()
-        assert len(data) == 1
+        assert "results" in data
+        assert len(data["results"]) == 1
         # Boost mode adds final_score field
-        assert "final_score" in data[0]
-        assert "cross_encoder_score" in data[0]
-        assert data[0]["label"] == "Auth"
+        assert "final_score" in data["results"][0]
+        assert "cross_encoder_score" in data["results"][0]
+        assert data["results"][0]["label"] == "Auth"
         # Boost mode fetches more candidates (rerank * 3)
         call = mock_instance.query_points.call_args
         assert call.kwargs["limit"] >= 50  # default rerank * 3

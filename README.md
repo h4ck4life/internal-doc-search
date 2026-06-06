@@ -207,6 +207,7 @@ curl -s -X POST http://localhost:8000/mcp/ \
 | `rerank_candidates` | 50 | 10–200 | Candidates fetched from Qdrant for reranking |
 | `label_match_mode` | `hard` | `hard` \| `boost` | `hard` = pre-filter by label, `boost` = score-blend off-label docs |
 | `label_boost_weight` | 0.3 | 0–1 | Label-match score weight in boost mode |
+| `min_ce_threshold` | 0.0 | 0–1 | Minimum cross-encoder score — results below this are filtered out |
 
 All configurable via the dashboard UI or `PUT /config`.
 

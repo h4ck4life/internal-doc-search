@@ -169,7 +169,7 @@
   </div>
 
   <!-- ─── Two-Column: URLs + Config ───────────────────────────── -->
-  <div class="grid grid-cols-1 lg:grid-cols-2 gap-5 mb-6">
+  <div class="grid grid-cols-1 gap-5 mb-6">
 
     <!-- URLs -->
     <details open class="bg-surface border border-border rounded-xl overflow-hidden">
@@ -279,7 +279,7 @@
     </details>
 
     <!-- Config -->
-    <details class="bg-surface border border-border rounded-xl overflow-hidden">
+    <details open class="bg-surface border border-border rounded-xl overflow-hidden">
       <summary class="px-5 py-3 font-semibold text-sm hover:bg-white/5 transition-colors select-none">
         ⚙️ Configuration
       </summary>
@@ -335,6 +335,14 @@
                    class="w-24 px-3 py-2 bg-gray-950 border border-border rounded-lg text-sm text-center
                           focus:outline-none focus:ring-2 focus:ring-blue-600/50">
             <span class="text-xs text-muted">0–1 (label blend)</span>
+          </div>
+          <!-- Min CE threshold -->
+          <div class="flex flex-wrap items-center gap-3">
+            <label for="cfgMinCeThreshold" class="w-28 flex-shrink-0 text-sm">Min CE score</label>
+            <input type="number" id="cfgMinCeThreshold" min="0" max="1" step="0.05"
+                   class="w-24 px-3 py-2 bg-gray-950 border border-border rounded-lg text-sm text-center
+                          focus:outline-none focus:ring-2 focus:ring-blue-600/50">
+            <span class="text-xs text-muted">0–1 (filter low CE)</span>
           </div>
         </div>
 
@@ -650,6 +658,7 @@ async function loadConfig() {
     document.getElementById('cfgRerankCandidates').value = c.rerank_candidates;
     document.getElementById('cfgLabelMatchMode').value = c.label_match_mode || 'hard';
     document.getElementById('cfgLabelBoostWeight').value = c.label_boost_weight ?? 0.3;
+    document.getElementById('cfgMinCeThreshold').value = c.min_ce_threshold ?? 0.0;
     searchLimit = c.search_limit;
     const hint = document.getElementById('labelModeHint');
     if (c.label_match_mode === 'boost') {
@@ -668,6 +677,7 @@ async function saveConfig(e) {
     rerank_candidates: +document.getElementById('cfgRerankCandidates').value,
     label_match_mode: document.getElementById('cfgLabelMatchMode').value,
     label_boost_weight: +document.getElementById('cfgLabelBoostWeight').value,
+    min_ce_threshold: +document.getElementById('cfgMinCeThreshold').value,
   };
   searchLimit = cfg.search_limit;
   const el = document.getElementById('configMsg');
@@ -685,6 +695,7 @@ function resetConfig() {
   document.getElementById('cfgRerankCandidates').value=50;
   document.getElementById('cfgLabelMatchMode').value='hard';
   document.getElementById('cfgLabelBoostWeight').value=0.3;
+  document.getElementById('cfgMinCeThreshold').value=0.0;
   saveConfig(new Event('submit'));
 }
 
@@ -703,17 +714,26 @@ async function doSearch() {
       params.append('label', sel.neg ? `-${sel.label}` : sel.label);
     }
     const data = await (await fetch(`/search?${params}`)).json();
-    if (!data.length) { results.innerHTML = '<p style="opacity:0.4;text-align:center;padding:1rem">No results found.</p>'; return; }
-    results.innerHTML = data.map(r => {
+    const items = Array.isArray(data) ? data : (data.results || []);
+    const hint = !Array.isArray(data) && data._hint ? data._hint : null;
+    if (!items.length) {
+      let html = '<p style="opacity:0.4;text-align:center;padding:1rem">No results found.</p>';
+      if (hint) html += `<p style="font-size:0.8rem;text-align:center;opacity:0.55;margin-top:0.3rem;padding:0.5rem;background:#1e3a5f;border-radius:8px">💡 ${esc(hint)}</p>`;
+      results.innerHTML = html; return;
+    }
+    let html = '';
+    if (hint) html += `<p style="font-size:0.78rem;opacity:0.55;margin-bottom:0.75rem;padding:0.5rem 0.75rem;background:#1e3a5f;border:1px solid #2a4d7a;border-radius:8px">💡 ${esc(hint)}</p>`;
+    html += items.map(r => {
       const ce = r.cross_encoder_score, cls = ce > 0.7 ? 'score-high' : ce > 0.3 ? 'score-mid' : 'score-low';
-      const labelBadge = r.label ? `<span style="font-size:0.72rem;opacity:0.5">[${esc(r.label)}]</span>` : '';
+      const labelBadge = r.label ? `<span class="inline-flex items-center gap-0.5 px-2 py-0.5 rounded-full text-xs font-medium bg-blue-900/60 text-blue-300 border border-blue-800/50">🏷 ${esc(r.label)}</span>` : '';
       const finalScore = r.final_score != null ? `<span>· Final ${r.final_score.toFixed(3)}</span>` : '';
       return `<article class="result-card bg-gray-950/50 border border-border rounded-lg p-4">
-        <div class="result-meta">${labelBadge}<span>CE <strong class="${cls}">${ce.toFixed(3)}</strong></span><span>· Qdrant ${r.score.toFixed(3)}</span>${finalScore}<span>· Chunk #${r.chunk_index}</span></div>
-        <div class="result-content">${esc(r.content)}</div>
+        <div class="result-meta flex flex-wrap items-center gap-x-3 gap-y-1">${labelBadge}<span class="flex items-center gap-2"><span>CE <strong class="${cls}">${ce.toFixed(3)}</strong></span><span>· Qdrant ${r.score.toFixed(3)}</span>${finalScore}<span>· Chunk #${r.chunk_index}</span></span></div>
+        <div class="result-content mt-2">${esc(r.content)}</div>
         <div class="result-url">🔗 <a href="${esc(r.url)}" target="_blank" class="text-blue-400 hover:underline">${esc(r.url)}</a></div>
       </article>`;
     }).join('');
+    results.innerHTML = html;
   } catch(e) { results.innerHTML = `<p style="color:#f87171">Error: ${esc(e.message)}</p>`; }
   finally { btn.disabled = false; btn.innerHTML = 'Search'; }
 }

@@ -175,6 +175,8 @@ async def search(q: str = Query(...), limit: int = Query(default=5, ge=1, le=50)
         if mode == "boost":
             qfilter = build_filter([], negative) if negative else None
 
+        min_ce_threshold = float(get_config("min_ce_threshold", "0.0"))
+
         # Stage 1: Bi-encoder retrieval
         query_vector = bi_encoder.encode(q).tolist()
         query_kwargs = dict(
@@ -187,7 +189,7 @@ async def search(q: str = Query(...), limit: int = Query(default=5, ge=1, le=50)
         results = await client.query_points(**query_kwargs)
 
         if not results.points:
-            return []
+            return {"results": []}
 
         # Stage 2: Cross-encoder rerank
         pairs = [(q, point.payload.get("content", "")) for point in results.points]
@@ -195,10 +197,34 @@ async def search(q: str = Query(...), limit: int = Query(default=5, ge=1, le=50)
 
         if mode == "boost" and positive:
             label_weight = float(get_config("label_boost_weight", "0.3"))
-            return apply_label_boost(
+            boosted = apply_label_boost(
                 results.points, ce_scores, positive,
                 label_weight=label_weight, limit=limit,
             )
+            # Filter by min CE threshold
+            boosted = [r for r in boosted if r["cross_encoder_score"] >= min_ce_threshold]
+            # Add hint if relevance is low
+            max_ce = max((r["cross_encoder_score"] for r in boosted), default=0)
+            if max_ce < 0.3:
+                from store import _get_conn
+                conn = _get_conn()
+                try:
+                    label_rows = conn.execute(
+                        "SELECT label FROM url_labels GROUP BY label ORDER BY label"
+                    ).fetchall()
+                    available = [r["label"] for r in label_rows]
+                finally:
+                    conn.close()
+                return {
+                    "results": boosted,
+                    "_hint": (
+                        f"Best cross-encoder score is only {max_ce:.4f} — the corpus "
+                        f"may not contain documents in the same language as your query "
+                        f"'{q}'. Available labels (topics/languages): {available}. "
+                        f"Try translating your query to match one of these labels."
+                    ),
+                }
+            return {"results": boosted}
 
         # Hard filter mode (or boost with no positive labels) — pure CE sort
         import math
@@ -212,9 +238,12 @@ async def search(q: str = Query(...), limit: int = Query(default=5, ge=1, le=50)
             if fp in seen:
                 continue
             seen.add(fp)
+            ce = round(sigmoid(float(ce_score)), 4)
+            if ce < min_ce_threshold:
+                continue
             combined.append({
                 "score": point.score,
-                "cross_encoder_score": round(sigmoid(float(ce_score)), 4),
+                "cross_encoder_score": ce,
                 "url": point.payload.get("url"),
                 "label": point.payload.get("label", ""),
                 "chunk_index": point.payload.get("chunk_index"),
@@ -222,7 +251,32 @@ async def search(q: str = Query(...), limit: int = Query(default=5, ge=1, le=50)
             })
 
         combined.sort(key=lambda x: x["cross_encoder_score"], reverse=True)
-        return combined[:limit]
+        results_out = combined[:limit]
+
+        # If best CE < 0.3, include hint with available labels so the caller
+        # knows topics/languages might not match the query.
+        max_ce = max((r["cross_encoder_score"] for r in results_out), default=0)
+        if max_ce < 0.3 and not (positive or negative):
+            from store import _get_conn
+            conn = _get_conn()
+            try:
+                label_rows = conn.execute(
+                    "SELECT label FROM url_labels GROUP BY label ORDER BY label"
+                ).fetchall()
+                available = [r["label"] for r in label_rows]
+            finally:
+                conn.close()
+            return {
+                "results": results_out,
+                "_hint": (
+                    f"Best cross-encoder score is only {max_ce:.4f} — the corpus "
+                    f"may not contain documents in the same language as your query "
+                    f"'{q}'. Available labels (topics/languages): {available}. "
+                    f"Try translating your query to match one of these labels."
+                ),
+            }
+
+        return {"results": results_out}
 
     finally:
         await client.close()
@@ -419,6 +473,7 @@ async def get_config_endpoint():
         "rerank_candidates": int(get_config("rerank_candidates", "50")),
         "label_match_mode": get_config("label_match_mode", "hard"),
         "label_boost_weight": float(get_config("label_boost_weight", "0.3")),
+        "min_ce_threshold": float(get_config("min_ce_threshold", "0.0")),
         "embedding_model": "multi-qa-mpnet-base-cos-v1",
         "cross_encoder_model": "cross-encoder/ms-marco-MiniLM-L-6-v2",
     }
@@ -429,7 +484,7 @@ async def update_config_endpoint(body: dict):
     """Update app configuration values. Accepts any subset of keys."""
     allowed = {
         "chunk_max_chars", "chunk_overlap", "search_limit", "rerank_candidates",
-        "label_match_mode", "label_boost_weight",
+        "label_match_mode", "label_boost_weight", "min_ce_threshold",
     }
     if "label_match_mode" in body and body["label_match_mode"] not in ("hard", "boost"):
         raise HTTPException(status_code=400, detail="label_match_mode must be 'hard' or 'boost'")
@@ -437,6 +492,10 @@ async def update_config_endpoint(body: dict):
         w = float(body["label_boost_weight"])
         if not 0.0 <= w <= 1.0:
             raise HTTPException(status_code=400, detail="label_boost_weight must be in [0, 1]")
+    if "min_ce_threshold" in body:
+        t = float(body["min_ce_threshold"])
+        if not 0.0 <= t <= 1.0:
+            raise HTTPException(status_code=400, detail="min_ce_threshold must be in [0, 1]")
     updated = {}
     for key, value in body.items():
         if key in allowed:

@@ -79,6 +79,9 @@ def init_db() -> None:
         "chunk_overlap": "100",
         "search_limit": "7",
         "rerank_candidates": "50",
+        "min_ce_threshold": "0.0",
+        "label_match_mode": "hard",
+        "label_boost_weight": "0.3",
     }
     for key, value in defaults.items():
         set_config(key, value, upsert_only=True)
