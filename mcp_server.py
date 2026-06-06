@@ -14,7 +14,7 @@ from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
 
-mcp = FastMCP("Doc Search", json_response=True, streamable_http_path="/")
+mcp = FastMCP("Doc Search", json_response=True)
 
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
 COLLECTION_NAME = "internal_docs"

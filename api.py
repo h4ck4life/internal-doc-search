@@ -48,48 +48,19 @@ def _load_models() -> None:
 
 @asynccontextmanager
 async def app_lifespan(app: FastAPI):
-    """Load models and init DB on startup."""
+    """Load models, init DB, and run MCP session manager in its own task group."""
     _load_models()
     init_db()
-    yield
-
-
-def _combine_lifespans(*lifespans):
-    """Combine multiple ASGI lifespan context managers into one."""
-
-    @asynccontextmanager
-    async def combined(app: FastAPI):
-        async def run(ls):
-            async with ls(app):
-                yield
-
-        # Build a chain of context managers
-        gens = [ls(app) for ls in lifespans]
-        # Enter all, then yield, then exit all
-        exits = []
-        try:
-            for gen in gens:
-                await gen.__anext__()
-                exits.append(gen)
-            yield
-        finally:
-            for gen in reversed(exits):
-                try:
-                    await gen.__anext__()
-                except StopAsyncIteration:
-                    pass
-
-    return combined
+    # MCP session_manager.run() is an async context manager that initializes
+    # the underlying anyio task group — required for streamable HTTP to work.
+    async with mcp_app.session_manager.run():
+        yield
 
 
 from mcp_server import mcp as mcp_app
 
 mcp_asgi = mcp_app.streamable_http_app()
-mcp_asgi_lifespan = getattr(mcp_asgi, "lifespan", None)
-app = FastAPI(
-    title="Internal Doc Search",
-    lifespan=_combine_lifespans(app_lifespan, mcp_asgi_lifespan) if mcp_asgi_lifespan else app_lifespan,
-)
+app = FastAPI(title="Internal Doc Search", lifespan=app_lifespan)
 
 # ─── Request/Response models ─────────────────────────────────────
 
@@ -385,6 +356,8 @@ async def update_config_endpoint(body: dict):
     return {"status": "updated", "config": updated}
 
 
-# MCP mount comes before static files
-app.mount("/mcp", mcp_asgi)
-app.mount("/", StaticFiles(directory="static", html=True), name="static")
+# MCP is mounted at root: Starlette Mount always prepends "/" to the
+# remaining path inside the sub-app, so the MCP route at "/mcp" needs
+# to be served at the root mount to receive "/mcp" requests correctly.
+app.mount("/", mcp_asgi)
+app.mount("/static", StaticFiles(directory="static", html=True), name="static")
