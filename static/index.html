@@ -607,6 +607,34 @@ function _fmtDate(iso) {
   return d.toLocaleDateString('en-GB', {day:'2-digit',month:'short',year:'numeric'}) + ' ' + d.toLocaleTimeString('en-GB', {hour:'2-digit',minute:'2-digit'});
 }
 
+function _renderUrlRow(u, isChild) {
+  const dc = u.deep_crawl ? `🔍 depth ${u.deep_crawl_max_depth || 3}` : '·';
+  const patInfo = [u.deep_crawl_url_pattern, u.deep_crawl_exclude_pattern].filter(Boolean).join(' / ') || '';
+  const labelsArr = (u.labels && u.labels.length) ? u.labels : (u.label ? [u.label] : []);
+  const labelsText = labelsArr.length ? labelsArr.join(', ') : '—';
+  const urlDisplay = isChild ? '↳ ' + u.url : u.url;
+  const rowCls = isChild ? `child-row child-of-${u.parent_url_id} hidden` : '';
+  return `<tr class="${rowCls}">
+    <td style="max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(u.url)}">${esc(urlDisplay)}</td>
+    <td title="${esc(labelsText)}">${esc(trunc(labelsText, 30))}</td>
+    <td style="font-size:0.72rem;max-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(patInfo)}">${dc}${patInfo?`<br><span style="opacity:0.5">${esc(trunc(patInfo,20))}</span>`:''}</td>
+    <td><span class="badge badge-${u.status}">${u.status}</span></td>
+    <td>${u.chunk_count ?? 0}</td>
+    <td style="font-size:0.75rem;white-space:nowrap">${_fmtDate(u.created_at)}</td>
+    <td>
+      <button class="btn-icon border border-gray-600 text-gray-300 hover:bg-gray-700 rounded transition-colors" onclick='startEdit(${u.id},"${esc(u.url)}","${esc(labelsText)}",${u.deep_crawl||0},${u.deep_crawl_max_depth||3},"${esc(u.deep_crawl_url_pattern||'')}","${esc(u.deep_crawl_exclude_pattern||'')}")' title="Edit">✏️</button>
+      <button class="btn-icon border border-gray-600 text-red-400 hover:bg-red-900/30 rounded transition-colors" onclick="removeUrl(${u.id})" title="Delete">🗑</button>
+    </td>
+  </tr>`;
+}
+
+function toggleChildren(parentId, btn) {
+  const rows = document.querySelectorAll(`.child-of-${parentId}`);
+  const isHidden = rows.length > 0 && rows[0].classList.contains('hidden');
+  rows.forEach(r => r.classList.toggle('hidden', !isHidden));
+  btn.textContent = isHidden ? '▼' : '▶';
+}
+
 async function loadUrls() {
   loadLabels();
   const tb = document.getElementById('urlTbody');
@@ -614,26 +642,25 @@ async function loadUrls() {
     const raw = await (await fetch('/urls')).json();
     const urls = _sortUrls(raw);
     if (!urls.length) { tb.innerHTML = '<tr><td colspan="7" style="text-align:center;opacity:0.4">No URLs yet. Add one above.</td></tr>'; return; }
-    tb.innerHTML = urls.map(u => {
-      const dc = u.deep_crawl ? `🔍 depth ${u.deep_crawl_max_depth || 3}` : '·';
-      const patInfo = [u.deep_crawl_url_pattern, u.deep_crawl_exclude_pattern].filter(Boolean).join(' / ') || '';
-      const labelsArr = (u.labels && u.labels.length) ? u.labels : (u.label ? [u.label] : []);
-      const labelsText = labelsArr.length ? labelsArr.join(', ') : '—';
-      const isAuto = u.parent_url_id != null;
-      const urlDisplay = isAuto ? '↳ ' + u.url : u.url;
-      return `<tr>
-        <td style="max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(u.url)}${patInfo?' — incl:'+esc(u.deep_crawl_url_pattern||'')+' excl:'+esc(u.deep_crawl_exclude_pattern||''):''}">${esc(urlDisplay)}</td>
-        <td title="${esc(labelsText)}">${esc(trunc(labelsText, 30))}</td>
-        <td style="font-size:0.72rem;max-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(patInfo)}">${dc}${patInfo?`<br><span style="opacity:0.5">${esc(trunc(patInfo,20))}</span>`:''}</td>
-        <td><span class="badge badge-${u.status}">${u.status}</span></td>
-        <td>${u.chunk_count ?? 0}</td>
-        <td style="font-size:0.75rem;white-space:nowrap">${_fmtDate(u.created_at)}</td>
-        <td>
-          <button class="btn-icon border border-gray-600 text-gray-300 hover:bg-gray-700 rounded transition-colors" onclick='startEdit(${u.id},"${esc(u.url)}","${esc(labelsText)}",${u.deep_crawl||0},${u.deep_crawl_max_depth||3},"${esc(u.deep_crawl_url_pattern||'')}","${esc(u.deep_crawl_exclude_pattern||'')}")' title="Edit">✏️</button>
-          <button class="btn-icon border border-gray-600 text-red-400 hover:bg-red-900/30 rounded transition-colors" onclick="removeUrl(${u.id})" title="Delete">🗑</button>
-        </td>
-      </tr>`;
-    }).join('');
+
+    // Separate parents and children
+    const parents = urls.filter(u => u.parent_url_id == null);
+    const children = urls.filter(u => u.parent_url_id != null);
+
+    // Build child count per parent
+    const childCount = {};
+    children.forEach(c => { childCount[c.parent_url_id] = (childCount[c.parent_url_id] || 0) + 1; });
+
+    // Render parents first, then children
+    let html = '';
+    parents.forEach(u => {
+      const n = childCount[u.id] || 0;
+      const expandBtn = n > 0 ? `<button class="text-xs mr-1" onclick="toggleChildren(${u.id}, this)" title="Show/hide ${n} discovered pages" style="background:none;border:1px solid #30363d;border-radius:4px;color:#8b949e;cursor:pointer;padding:0 3px">▶</button>` : '';
+      html += _renderUrlRow({...u, url: expandBtn + u.url}, false);
+    });
+    children.forEach(u => html += _renderUrlRow(u, true));
+
+    tb.innerHTML = html;
   } catch(e) { tb.innerHTML = '<tr><td colspan="7" style="text-align:center;color:#f87171">Failed to load</td></tr>'; }
 }
 
