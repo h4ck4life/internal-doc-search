@@ -70,7 +70,7 @@ python ingest.py
 {"mcpServers": {"doc-search": {"type": "http", "url": "http://localhost:8000/mcp/"}}}
 ```
 Or add per-project: `claude mcp add --transport http doc-search http://localhost:8000/mcp/`
-Or add globally: `claude mcp --scope user add --transport http doc-search http://localhost:8000/mcp/`
+Or add globally: `claude mcp add --scope user --transport http doc-search http://localhost:8000/mcp/`
 
 **Background ingest**: `POST /ingest` spawns `asyncio.create_task(_background_ingest())` which calls `ingest.run_ingest(on_progress=callback)`. Progress tracked in module-level `_ingest_state` dict, polled via `GET /ingest/status`. Frontend polls every 1s during crawl.
 

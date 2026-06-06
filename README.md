@@ -130,7 +130,7 @@ claude mcp add --transport http doc-search http://localhost:8000/mcp/
 **Option C — CLI (add globally, all projects):**
 
 ```bash
-claude mcp --scope user add --transport http doc-search http://localhost:8000/mcp/
+claude mcp add --scope user --transport http doc-search http://localhost:8000/mcp/
 ```
 
 ### Configure in Claude Desktop
