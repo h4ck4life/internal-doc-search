@@ -77,11 +77,14 @@ def init_db() -> None:
     defaults = {
         "chunk_max_chars": "2000",
         "chunk_overlap": "100",
+        "chunk_max_tokens": "400",
+        "chunk_overlap_tokens": "80",
         "search_limit": "7",
         "rerank_candidates": "50",
         "min_ce_threshold": "0.0",
         "label_match_mode": "hard",
         "label_boost_weight": "0.3",
+        "source_diversity_cap": "2",
     }
     for key, value in defaults.items():
         set_config(key, value, upsert_only=True)

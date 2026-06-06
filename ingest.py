@@ -1,4 +1,4 @@
-"""Ingestion pipeline: crawl docs → chunk → embed → store in Qdrant."""
+"""Ingestion pipeline: crawl docs → extract metadata → chunk → embed → store in Qdrant."""
 
 import asyncio
 import os
@@ -12,7 +12,7 @@ from crawl4ai.deep_crawling.filters import FilterChain, URLPatternFilter
 from qdrant_client import AsyncQdrantClient, models
 from sentence_transformers import SentenceTransformer
 
-from chunker import chunk_text
+from chunker import chunk_text_with_metadata, extract_section_headings
 from store import (
     init_db,
     list_urls,
@@ -51,6 +51,65 @@ def _wildcard_match(url: str, pattern: str) -> bool:
     # Convert glob pattern to regex: escape regex chars, then replace \* with .*
     regex_pat = re.escape(pattern).replace(r"\*", ".*")
     return re.search(regex_pat, url, re.IGNORECASE) is not None
+
+
+def extract_page_title(markdown: str) -> str:
+    """Extract the page title from the first # heading in markdown.
+
+    Args:
+        markdown: The full markdown content of a crawled page.
+
+    Returns:
+        The heading text (without the leading '# ') or empty string.
+    """
+    m = re.search(r"^#\s+(.+)$", markdown, re.MULTILINE)
+    return m.group(1).strip() if m else ""
+
+
+def classify_content_type(url: str, markdown: str) -> str:
+    """Heuristic classifier for documentation content type.
+
+    Uses URL patterns and content signals to classify into one of:
+    api-reference, conceptual, tutorial, reference, changelog, unknown.
+
+    Args:
+        url: The page URL.
+        markdown: The full markdown content (for content-based signals).
+
+    Returns:
+        Content type string.
+    """
+    url_lower = url.lower()
+
+    # URL-based patterns (checked in priority order)
+    if re.search(r"/(api|rest|graphql)(/|\.|$)", url_lower):
+        return "api-reference"
+    if re.search(r"/(changelog|releases|whats-new)", url_lower):
+        return "changelog"
+    if re.search(r"/(tutorial|guide|quickstart|getting-started|walkthrough)", url_lower):
+        return "tutorial"
+    if re.search(r"/(reference|spec|schema)", url_lower):
+        return "reference"
+
+    # Content-based signals
+    if markdown:
+        # High density of code blocks suggests API reference
+        code_blocks = len(re.findall(r"```", markdown))
+        if code_blocks >= 6:
+            return "api-reference"
+        # Step-by-step numbered instructions suggest tutorial
+        numbered_steps = len(re.findall(r"^\d+\.\s", markdown, re.MULTILINE))
+        if numbered_steps >= 5:
+            return "tutorial"
+
+    # Check for conceptual markers in first 500 chars
+    intro = markdown[:500].lower() if markdown else ""
+    if re.search(r"/(discover|learn|concepts|overview|introduction|about)(/|\.|$)", url_lower):
+        return "conceptual"
+    if any(kw in intro for kw in ["overview", "introduction", "concept", "architecture"]):
+        return "conceptual"
+
+    return "unknown"
 
 
 async def _crawl_single_url(
@@ -141,8 +200,17 @@ async def run_ingest(on_progress=None, only_pending: bool = False) -> Dict:
 
     model = _get_model()
     client = AsyncQdrantClient(url=QDRANT_URL, check_compatibility=False)
-    max_chars = int(get_config("chunk_max_chars", "2000"))
-    overlap = int(get_config("chunk_overlap", "100"))
+
+    # Read token-aware chunk config (new keys preferred, fall back to deprecated char keys)
+    max_tokens = int(get_config("chunk_max_tokens", "0") or "0")
+    overlap_tokens = int(get_config("chunk_overlap_tokens", "0") or "0")
+    if max_tokens <= 0:
+        # Fallback to deprecated character-based config
+        max_chars = int(get_config("chunk_max_chars", "2000"))
+        max_tokens = max(50, max_chars // 4)
+    if overlap_tokens <= 0:
+        overlap_chars = int(get_config("chunk_overlap", "100"))
+        overlap_tokens = max(10, overlap_chars // 4)
 
     await _ensure_collection(client)
 
@@ -214,15 +282,42 @@ async def run_ingest(on_progress=None, only_pending: bool = False) -> Dict:
                     ),
                 )
 
+                # First pass: chunk all pages and collect metadata
                 all_points = []
+                page_chunks: list[list[dict]] = []  # per-page list of chunk dicts
+                page_metas: list[dict] = []          # per-page {page_title, content_type}
+
                 for page_idx, md_text in enumerate(markdowns):
                     if not md_text or not md_text.strip():
+                        page_chunks.append([])
+                        page_metas.append({"page_title": "", "content_type": "unknown"})
                         continue
+                    # Extract page-level metadata
+                    page_title = extract_page_title(md_text)
+                    content_type = classify_content_type(url, md_text)
+                    page_metas.append({"page_title": page_title, "content_type": content_type})
+
                     # fit_markdown already strips nav/footer/sidebar during crawl.
-                    # We chunk the cleaned output directly — no regex post-processing.
-                    chunks = chunk_text(md_text, max_chars=max_chars, overlap=overlap)
-                    for chunk_idx, chunk in enumerate(chunks):
-                        embedding = model.encode(chunk).tolist()
+                    # Token-aware chunking with section heading metadata.
+                    chunks_with_meta = chunk_text_with_metadata(
+                        md_text,
+                        max_tokens=max_tokens,
+                        overlap_tokens=overlap_tokens,
+                    )
+                    page_chunks.append(chunks_with_meta)
+
+                # Compute total unique chunks across all pages for this URL
+                total_unique_chunks = sum(len(pc) for pc in page_chunks)
+
+                # Second pass: create points with full metadata
+                for page_idx, chunks_with_meta in enumerate(page_chunks):
+                    if not chunks_with_meta:
+                        continue
+                    meta = page_metas[page_idx]
+                    for chunk_idx, cm in enumerate(chunks_with_meta):
+                        chunk_text_content = cm["text"]
+                        section_heading = cm["section_heading"]
+                        embedding = model.encode(chunk_text_content).tolist()
                         for lbl in url_labels:
                             all_points.append(
                                 models.PointStruct(
@@ -233,7 +328,11 @@ async def run_ingest(on_progress=None, only_pending: bool = False) -> Dict:
                                         "label": lbl,
                                         "chunk_index": chunk_idx,
                                         "page_index": page_idx if len(markdowns) > 1 else 0,
-                                        "content": chunk,
+                                        "content": chunk_text_content,
+                                        "page_title": meta["page_title"],
+                                        "section_heading": section_heading,
+                                        "content_type": meta["content_type"],
+                                        "total_chunks": total_unique_chunks,
                                     },
                                 )
                             )

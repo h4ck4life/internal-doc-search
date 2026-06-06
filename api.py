@@ -21,7 +21,11 @@ from store import (
     set_config,
 )
 
-from label_resolver import parse_labels, build_filter, apply_label_boost
+from search_utils import (
+    parse_labels, build_filter, apply_label_boost,
+    normalize_results, apply_min_ce_threshold,
+    apply_source_diversity, generate_low_relevance_hint,
+)
 
 COLLECTION_NAME = "internal_docs"
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
@@ -175,7 +179,8 @@ async def search(q: str = Query(...), limit: int = Query(default=5, ge=1, le=50)
         if mode == "boost":
             qfilter = build_filter([], negative) if negative else None
 
-        min_ce_threshold = float(get_config("min_ce_threshold", "0.0"))
+        min_ce = float(get_config("min_ce_threshold", "0.0"))
+        diversity_cap = int(get_config("source_diversity_cap", "2"))
 
         # Stage 1: Bi-encoder retrieval
         query_vector = bi_encoder.encode(q).tolist()
@@ -195,68 +200,28 @@ async def search(q: str = Query(...), limit: int = Query(default=5, ge=1, le=50)
         pairs = [(q, point.payload.get("content", "")) for point in results.points]
         ce_scores = cross_encoder.predict(pairs)
 
+        # Stage 3: Normalize, filter, diversify
         if mode == "boost" and positive:
             label_weight = float(get_config("label_boost_weight", "0.3"))
-            boosted = apply_label_boost(
+            combined = apply_label_boost(
                 results.points, ce_scores, positive,
-                label_weight=label_weight, limit=limit,
+                label_weight=label_weight, limit=None,  # no limit yet — diversity first
             )
-            # Filter by min CE threshold
-            boosted = [r for r in boosted if r["cross_encoder_score"] >= min_ce_threshold]
-            # Add hint if relevance is low
-            max_ce = max((r["cross_encoder_score"] for r in boosted), default=0)
-            if max_ce < 0.3:
-                from store import _get_conn
-                conn = _get_conn()
-                try:
-                    label_rows = conn.execute(
-                        "SELECT label FROM url_labels GROUP BY label ORDER BY label"
-                    ).fetchall()
-                    available = [r["label"] for r in label_rows]
-                finally:
-                    conn.close()
-                return {
-                    "results": boosted,
-                    "_hint": (
-                        f"Best cross-encoder score is only {max_ce:.4f} — the corpus "
-                        f"may not contain documents in the same language as your query "
-                        f"'{q}'. Available labels (topics/languages): {available}. "
-                        f"Try translating your query to match one of these labels."
-                    ),
-                }
-            return {"results": boosted}
+            combined = apply_min_ce_threshold(combined, min_ce)
+        else:
+            combined = normalize_results(
+                results.points, ce_scores, limit=len(results.points),
+                include_all_metadata=True,
+            )
+            combined = apply_min_ce_threshold(combined, min_ce)
 
-        # Hard filter mode (or boost with no positive labels) — pure CE sort
-        import math
-        def sigmoid(x): return 1 / (1 + math.exp(-x))
-
-        seen = set()
-        combined = []
-        for point, ce_score in zip(results.points, ce_scores):
-            content = point.payload.get("content", "")
-            fp = hash(content[:100])
-            if fp in seen:
-                continue
-            seen.add(fp)
-            ce = round(sigmoid(float(ce_score)), 4)
-            if ce < min_ce_threshold:
-                continue
-            combined.append({
-                "score": point.score,
-                "cross_encoder_score": ce,
-                "url": point.payload.get("url"),
-                "label": point.payload.get("label", ""),
-                "chunk_index": point.payload.get("chunk_index"),
-                "content": content,
-            })
-
-        combined.sort(key=lambda x: x["cross_encoder_score"], reverse=True)
+        # Apply source diversity, then cap to requested limit
+        combined = apply_source_diversity(combined, diversity_cap)
         results_out = combined[:limit]
 
-        # If best CE < 0.3, include hint with available labels so the caller
-        # knows topics/languages might not match the query.
+        # Low-relevance hint
         max_ce = max((r["cross_encoder_score"] for r in results_out), default=0)
-        if max_ce < 0.3 and not (positive or negative):
+        if not (positive or negative) and len(results_out) > 0:
             from store import _get_conn
             conn = _get_conn()
             try:
@@ -266,15 +231,10 @@ async def search(q: str = Query(...), limit: int = Query(default=5, ge=1, le=50)
                 available = [r["label"] for r in label_rows]
             finally:
                 conn.close()
-            return {
-                "results": results_out,
-                "_hint": (
-                    f"Best cross-encoder score is only {max_ce:.4f} — the corpus "
-                    f"may not contain documents in the same language as your query "
-                    f"'{q}'. Available labels (topics/languages): {available}. "
-                    f"Try translating your query to match one of these labels."
-                ),
-            }
+            hint = generate_low_relevance_hint(max_ce, q, available)
+            if hint:
+                hint["results"] = results_out
+                return hint
 
         return {"results": results_out}
 
@@ -469,11 +429,14 @@ async def get_config_endpoint():
     return {
         "chunk_max_chars": int(get_config("chunk_max_chars", "2000")),
         "chunk_overlap": int(get_config("chunk_overlap", "100")),
+        "chunk_max_tokens": int(get_config("chunk_max_tokens", "400")),
+        "chunk_overlap_tokens": int(get_config("chunk_overlap_tokens", "80")),
         "search_limit": int(get_config("search_limit", "7")),
         "rerank_candidates": int(get_config("rerank_candidates", "50")),
         "label_match_mode": get_config("label_match_mode", "hard"),
         "label_boost_weight": float(get_config("label_boost_weight", "0.3")),
         "min_ce_threshold": float(get_config("min_ce_threshold", "0.0")),
+        "source_diversity_cap": int(get_config("source_diversity_cap", "2")),
         "embedding_model": "multi-qa-mpnet-base-cos-v1",
         "cross_encoder_model": "cross-encoder/ms-marco-MiniLM-L-6-v2",
     }
@@ -483,8 +446,11 @@ async def get_config_endpoint():
 async def update_config_endpoint(body: dict):
     """Update app configuration values. Accepts any subset of keys."""
     allowed = {
-        "chunk_max_chars", "chunk_overlap", "search_limit", "rerank_candidates",
+        "chunk_max_chars", "chunk_overlap",
+        "chunk_max_tokens", "chunk_overlap_tokens",
+        "search_limit", "rerank_candidates",
         "label_match_mode", "label_boost_weight", "min_ce_threshold",
+        "source_diversity_cap",
     }
     if "label_match_mode" in body and body["label_match_mode"] not in ("hard", "boost"):
         raise HTTPException(status_code=400, detail="label_match_mode must be 'hard' or 'boost'")

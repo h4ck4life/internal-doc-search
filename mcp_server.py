@@ -2,9 +2,12 @@
 
 Tools:
   - list_labels: List all available labels with chunk/URL counts
-  - search_docs: Semantic search with two-stage retrieval, multi-label filter
+  - search_docs: Semantic search with two-stage retrieval, multi-label filter,
+                 boost mode, source diversity, and enriched metadata
   - add_url_to_crawl: Add a URL to the crawl queue
   - trigger_crawl: Start background re-ingestion
+  - get_chunks_for_url: Fetch all chunks from a specific URL (paginated)
+  - get_adjacent_chunks: Fetch surrounding chunks for context exploration
 
 Run: `fastmcp run mcp_server.py` (standalone) or mounted in FastAPI via `mcp.http_app()`
 """
@@ -15,12 +18,22 @@ from typing import Optional
 
 from fastmcp import FastMCP
 
+from search_utils import (
+    parse_labels,
+    build_filter,
+    apply_label_boost,
+    normalize_results,
+    apply_min_ce_threshold,
+    apply_source_diversity,
+    generate_low_relevance_hint,
+)
+
 mcp = FastMCP("Doc Search")
 
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
 COLLECTION_NAME = "internal_docs"
 
-# Lazy model/ingest loading
+# Lazy module loading
 _imports_loaded = False
 
 
@@ -34,67 +47,6 @@ def _ensure_imports():
     from qdrant_client import AsyncQdrantClient, models  # noqa: F811
     from store import init_db, list_urls, add_url, get_config  # noqa: F811
     _imports_loaded = True
-
-
-def _parse_labels(raw: Optional[list[str]]) -> tuple[list[str], list[str]]:
-    """Split raw label list into positive and negative (prefix '-')."""
-    positive: list[str] = []
-    negative: list[str] = []
-    for item in raw or []:
-        for piece in str(item).split(","):
-            piece = piece.strip()
-            if not piece:
-                continue
-            if piece.startswith("-"):
-                neg = piece[1:].strip()
-                if neg and neg not in negative:
-                    negative.append(neg)
-            else:
-                if piece not in positive:
-                    positive.append(piece)
-    return positive, negative
-
-
-def _build_filter(positive: list[str], negative: list[str]):
-    """Build Qdrant filter: should=OR for positive, must_not for negative."""
-    from qdrant_client import models  # noqa: F811
-    if not positive and not negative:
-        return None
-    kwargs = {}
-    if positive:
-        kwargs["should"] = [
-            models.FieldCondition(key="label", match=models.MatchValue(value=v))
-            for v in positive
-        ]
-    if negative:
-        kwargs["must_not"] = [
-            models.FieldCondition(key="label", match=models.MatchValue(value=v))
-            for v in negative
-        ]
-    return models.Filter(**kwargs)
-
-
-def _normalize_scores(results, ce_scores, limit: int) -> list[dict]:
-    """Combine bi-encoder + cross-encoder, dedupe, sort, return top N."""
-    import math
-    seen: set = set()
-    combined = []
-    for point, ce_score in zip(results, ce_scores):
-        content = point.payload.get("content", "")
-        fp = hash(content[:100])
-        if fp in seen:
-            continue
-        seen.add(fp)
-        combined.append({
-            "cross_encoder_score": round(1 / (1 + math.exp(-float(ce_score))), 4),
-            "qdrant_score": round(point.score, 4),
-            "url": point.payload.get("url"),
-            "label": point.payload.get("label", ""),
-            "chunk_index": point.payload.get("chunk_index"),
-            "content": content,
-        })
-    combined.sort(key=lambda x: x["cross_encoder_score"], reverse=True)
-    return combined[:limit]
 
 
 @mcp.tool()
@@ -114,9 +66,6 @@ async def list_labels() -> list[dict]:
     _ensure_imports()
     client = AsyncQdrantClient(url=QDRANT_URL, check_compatibility=False)  # noqa: F811
     try:
-        # Scroll all points to aggregate label counts. For very large collections
-        # this could be optimized to a Qdrant facet aggregation API, but
-        # internal-doc scale is small enough that a full scroll is fine.
         agg: dict[str, dict[str, int]] = {}
         offset = None
         while True:
@@ -152,7 +101,12 @@ async def list_labels() -> list[dict]:
 
 
 @mcp.tool()
-async def search_docs(query: str, limit: int = 5, labels: Optional[list[str]] = None) -> dict:
+async def search_docs(
+    query: str,
+    limit: int = 5,
+    labels: Optional[list[str]] = None,
+    label_match_mode: str = "hard",
+) -> dict:
     """Semantic search across crawled documentation with two-stage retrieval.
 
     IMPORTANT — if results have low cross_encoder_score (< 0.3), the documents
@@ -172,32 +126,46 @@ async def search_docs(query: str, limit: int = 5, labels: Optional[list[str]] = 
             - Prefix a label with "-" to exclude it: ["-Changelog"].
             - Combine: ["Auth", "-Changelog"] — only Auth, never Changelog.
             - Comma-separated strings also accepted: ["Auth, Pricing"].
+        label_match_mode: "hard" (default) — strict label filter, only matching
+            labels returned. "boost" — fetch 3× candidates, blend label-match
+            bonus into scores so cross-topic results can still surface.
 
     Returns:
         Dict with "results" list and an optional "_hint" when relevance is low.
-        Each result has cross-encoder score, content preview, URL, and label.
+        Each result has: cross_encoder_score, score, url, label, chunk_index,
+        page_index, content, page_title, section_heading, content_type,
+        total_chunks.
     """
     _ensure_imports()
 
-    # Reuse the module-level encoder singletons from api.py — they are loaded
-    # once at startup (lifespan) and cached. Creating new SentenceTransformer /
-    # CrossEncoder instances on every call would load 400MB+ weights each time,
-    # which causes the "Loading weights" log lines on every request.
     from api import bi_encoder, cross_encoder
 
     client = AsyncQdrantClient(url=QDRANT_URL, check_compatibility=False)  # noqa: F811
 
     try:
         rerank_candidates = int(get_config("rerank_candidates", "50"))  # noqa: F811
+        min_ce = float(get_config("min_ce_threshold", "0.0"))  # noqa: F811
+        diversity_cap = int(get_config("source_diversity_cap", "2"))  # noqa: F811
 
-        positive, negative = _parse_labels(labels)
-        qfilter = _build_filter(positive, negative)
+        if label_match_mode not in ("hard", "boost"):
+            return {"error": f"label_match_mode must be 'hard' or 'boost', got {label_match_mode!r}"}
 
+        positive, negative = parse_labels(labels)
+
+        # Boost mode: fetch more candidates, skip label pre-filter
+        if label_match_mode == "boost":
+            candidate_limit = rerank_candidates * 3
+            qfilter = build_filter([], negative) if negative else None
+        else:
+            candidate_limit = rerank_candidates
+            qfilter = build_filter(positive, negative)
+
+        # Stage 1: Bi-encoder retrieval
         query_vector = bi_encoder.encode(query).tolist()
         query_kwargs = dict(
             collection_name=COLLECTION_NAME,
             query=query_vector,
-            limit=rerank_candidates,
+            limit=candidate_limit,
         )
         if qfilter is not None:
             query_kwargs["query_filter"] = qfilter
@@ -206,13 +174,30 @@ async def search_docs(query: str, limit: int = 5, labels: Optional[list[str]] = 
         if not results.points:
             return {"results": []}
 
+        # Stage 2: Cross-encoder rerank
         pairs = [(query, p.payload.get("content", "")) for p in results.points]
         ce_scores = cross_encoder.predict(pairs)
-        normalized = _normalize_scores(results.points, ce_scores, limit)
 
-        # If the best result has a very low cross-encoder score, the corpus
-        # likely doesn't contain content in the query's language. Include a
-        # hint with available labels so the LLM can translate and re-search.
+        # Stage 3: Normalize, filter, diversify
+        if label_match_mode == "boost" and positive:
+            label_weight = float(get_config("label_boost_weight", "0.3"))  # noqa: F811
+            combined = apply_label_boost(
+                results.points, ce_scores, positive,
+                label_weight=label_weight, limit=None,
+            )
+            combined = apply_min_ce_threshold(combined, min_ce)
+        else:
+            combined = normalize_results(
+                results.points, ce_scores, limit=len(results.points),
+                include_all_metadata=True,
+            )
+            combined = apply_min_ce_threshold(combined, min_ce)
+
+        # Apply source diversity, then cap to requested limit
+        combined = apply_source_diversity(combined, diversity_cap)
+        normalized = combined[:limit]
+
+        # Low-relevance hint
         max_ce = max((r["cross_encoder_score"] for r in normalized), default=0)
         response = {"results": normalized}
         if max_ce < 0.3 and not (positive or negative):
@@ -234,14 +219,174 @@ async def search_docs(query: str, limit: int = 5, labels: Optional[list[str]] = 
                 if offset is None:
                     break
             available = sorted(label_agg.keys()) if label_agg else []
-            response["_hint"] = (
-                f"Best cross-encoder score is only {max_ce:.4f} — the corpus "
-                f"may not contain documents in the same language as your query "
-                f"'{query}'. Available labels (topics/languages): {available}. "
-                f"Try translating your query to match one of these labels and "
-                f"re-search with labels=[<label>]."
-            )
+            hint = generate_low_relevance_hint(max_ce, query, available)
+            if hint:
+                hint["results"] = normalized
+                return hint
+
         return response
+    finally:
+        await client.close()
+
+
+@mcp.tool()
+async def get_chunks_for_url(
+    url: str,
+    limit: int = 50,
+    offset: int = 0,
+) -> dict:
+    """Fetch all chunks stored for a specific URL, with pagination.
+
+    Use this after search_docs() when you find a promising result and want
+    to see all content from that source. Useful for getting full document
+    context beyond the snippet returned by search.
+
+    Args:
+        url: The exact URL to fetch chunks for (from a search result's "url" field).
+        limit: Maximum chunks to return (default 50, max 100).
+        offset: Number of chunks to skip for pagination (default 0).
+
+    Returns:
+        Dict with "chunks" list (ordered by page_index, then chunk_index)
+        and "total" count of all chunks for this URL. Each chunk includes
+        content, chunk_index, page_index, page_title, section_heading,
+        content_type.
+    """
+    _ensure_imports()
+    client = AsyncQdrantClient(url=QDRANT_URL, check_compatibility=False)  # noqa: F811
+
+    try:
+        limit = max(1, min(limit, 100))
+
+        # Scroll all points matching this URL
+        all_points: list[dict] = []
+        scroll_offset = None
+        while True:
+            points, scroll_offset = await client.scroll(
+                collection_name=COLLECTION_NAME,
+                offset=scroll_offset,
+                limit=500,
+                with_payload=True,
+                with_vectors=False,
+                scroll_filter=models.Filter(
+                    must=[
+                        models.FieldCondition(
+                            key="url",
+                            match=models.MatchValue(value=url),
+                        )
+                    ]
+                ),
+            )
+            for p in points:
+                payload = p.payload
+                all_points.append({
+                    "content": payload.get("content", ""),
+                    "chunk_index": payload.get("chunk_index", 0),
+                    "page_index": payload.get("page_index", 0),
+                    "page_title": payload.get("page_title", ""),
+                    "section_heading": payload.get("section_heading", ""),
+                    "content_type": payload.get("content_type", "unknown"),
+                    "label": payload.get("label", ""),
+                })
+            if scroll_offset is None:
+                break
+
+        # Deduplicate by (page_index, chunk_index) since chunks are replicated per label
+        seen: set[tuple[int, int]] = set()
+        unique: list[dict] = []
+        for chunk in sorted(all_points, key=lambda c: (c["page_index"], c["chunk_index"])):
+            key = (chunk["page_index"], chunk["chunk_index"])
+            if key not in seen:
+                seen.add(key)
+                unique.append(chunk)
+
+        total = len(unique)
+        paged = unique[offset:offset + limit]
+
+        return {"chunks": paged, "total": total, "url": url}
+    finally:
+        await client.close()
+
+
+@mcp.tool()
+async def get_adjacent_chunks(
+    url: str,
+    chunk_index: int,
+    page_index: int = 0,
+    window: int = 1,
+) -> dict:
+    """Fetch chunks surrounding a specific chunk for context exploration.
+
+    Use this when a search result's content snippet is promising but you
+    need surrounding context — what comes before or after this chunk in
+    the original document.
+
+    Args:
+        url: The exact URL (from a search result's "url" field).
+        chunk_index: The chunk index to center on (from search result).
+        page_index: The page index within a multi-page crawl (default 0).
+        window: Number of chunks to fetch before and after (default 1).
+            window=2 fetches up to 2 before + target + 2 after = up to 5 chunks.
+
+    Returns:
+        Dict with "chunks" list (ordered by chunk_index) and "target_index".
+        Each chunk includes content, chunk_index, page_index, page_title,
+        section_heading.
+    """
+    _ensure_imports()
+    client = AsyncQdrantClient(url=QDRANT_URL, check_compatibility=False)  # noqa: F811
+
+    try:
+        # Fetch all chunks for this URL + page
+        all_chunks: dict[int, dict] = {}
+        scroll_offset = None
+        while True:
+            points, scroll_offset = await client.scroll(
+                collection_name=COLLECTION_NAME,
+                offset=scroll_offset,
+                limit=500,
+                with_payload=True,
+                with_vectors=False,
+                scroll_filter=models.Filter(
+                    must=[
+                        models.FieldCondition(
+                            key="url",
+                            match=models.MatchValue(value=url),
+                        ),
+                        models.FieldCondition(
+                            key="page_index",
+                            match=models.MatchValue(value=page_index),
+                        ),
+                    ]
+                ),
+            )
+            for p in points:
+                payload = p.payload
+                ci = payload.get("chunk_index", 0)
+                if ci not in all_chunks:
+                    all_chunks[ci] = {
+                        "content": payload.get("content", ""),
+                        "chunk_index": ci,
+                        "page_index": payload.get("page_index", 0),
+                        "page_title": payload.get("page_title", ""),
+                        "section_heading": payload.get("section_heading", ""),
+                    }
+            if scroll_offset is None:
+                break
+
+        # Collect window around target
+        min_idx = chunk_index - window
+        max_idx = chunk_index + window
+        adjacent = []
+        for ci in sorted(all_chunks.keys()):
+            if min_idx <= ci <= max_idx:
+                adjacent.append(all_chunks[ci])
+
+        return {
+            "chunks": adjacent,
+            "target_index": chunk_index,
+            "total_in_page": len(all_chunks),
+        }
     finally:
         await client.close()
 
