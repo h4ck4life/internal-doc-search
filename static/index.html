@@ -623,7 +623,8 @@ function _renderUrlRow(u, isChild) {
     <td>${u.chunk_count ?? 0}</td>
     <td style="font-size:0.75rem;white-space:nowrap">${_fmtDate(u.created_at)}</td>
     <td>
-      <button class="btn-icon border border-gray-600 text-gray-300 hover:bg-gray-700 rounded transition-colors" onclick='startEdit(${u.id},"${esc(u.url)}","${esc(labelsText)}",${u.deep_crawl||0},${u.deep_crawl_max_depth||3},"${esc(u.deep_crawl_url_pattern||'')}","${esc(u.deep_crawl_exclude_pattern||'')}")' title="Edit">✏️</button>
+      <!-- Edit hidden for auto-discovered pages — managed by seed's deep crawl config -->
+      <button class="btn-icon border border-gray-600 text-gray-300 hover:bg-gray-700 rounded transition-colors ${isChild ? 'hidden' : ''}" onclick='startEdit(${u.id},"${esc(u.url)}","${esc(labelsText)}",${u.deep_crawl||0},${u.deep_crawl_max_depth||3},"${esc(u.deep_crawl_url_pattern||'')}","${esc(u.deep_crawl_exclude_pattern||'')}")' title="Edit">✏️</button>
       <button class="btn-icon border border-gray-600 text-red-400 hover:bg-red-900/30 rounded transition-colors" onclick="removeUrl(${u.id})" title="Delete">🗑</button>
     </td>
   </tr>`;
