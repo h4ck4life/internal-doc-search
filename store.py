@@ -64,6 +64,7 @@ def init_db() -> None:
         _migrate_add_column(conn, "urls", "deep_crawl_max_depth", "INTEGER DEFAULT 3")
         _migrate_add_column(conn, "urls", "deep_crawl_url_pattern", "TEXT DEFAULT ''")
         _migrate_add_column(conn, "urls", "deep_crawl_exclude_pattern", "TEXT DEFAULT ''")
+        _migrate_add_column(conn, "urls", "parent_url_id", "INTEGER REFERENCES urls(id)")
         conn.commit()
 
         # Migrate: copy legacy single-label rows into url_labels so search
@@ -189,6 +190,66 @@ def add_url(url: str, label: str = "", labels: Optional[List[str]] = None,
         conn.close()
 
 
+def add_discovered_url(
+    url: str,
+    parent_id: int,
+    labels: List[str],
+    deep_crawl: bool = False,
+    deep_crawl_max_depth: int = 3,
+    deep_crawl_url_pattern: str = "",
+    deep_crawl_exclude_pattern: str = "",
+) -> Optional[dict]:
+    """Register a URL discovered during deep crawl.
+
+    INSERT OR IGNORE — if the URL already exists (e.g. discovered by
+    another seed), return the existing row unchanged.
+    The discovered URL inherits labels + deep crawl config from its parent.
+    Status is set to 'completed' since it was just crawled.
+
+    Args:
+        url: The discovered page URL.
+        parent_id: ID of the seed URL that discovered this page.
+        labels: Labels to inherit from the parent.
+        deep_crawl, deep_crawl_max_depth, deep_crawl_url_pattern,
+        deep_crawl_exclude_pattern: Inherited from parent.
+
+    Returns:
+        Row dict with 'labels' list, or None if insert failed.
+    """
+    merged = _normalize_labels(labels)
+    primary = merged[0] if merged else ""
+
+    conn = _get_conn()
+    try:
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO urls "
+            "(url, label, status, deep_crawl, deep_crawl_max_depth, "
+            "deep_crawl_url_pattern, deep_crawl_exclude_pattern, "
+            "parent_url_id, created_at) "
+            "VALUES (?, ?, 'completed', ?, ?, ?, ?, ?, ?)",
+            (url, primary, int(deep_crawl), deep_crawl_max_depth,
+             deep_crawl_url_pattern, deep_crawl_exclude_pattern,
+             parent_id, _now_iso()),
+        )
+        conn.commit()
+        # Get the row (either newly inserted or existing)
+        row = conn.execute(
+            "SELECT * FROM urls WHERE url = ?", (url,)
+        ).fetchone()
+        if row is None:
+            return None
+        url_id = row["id"]
+        # Only set labels for newly inserted URLs
+        if cur.rowcount > 0:
+            _set_url_labels(conn, url_id, merged)
+            conn.commit()
+        result = dict(row)
+        result["labels"] = _get_url_labels(conn, url_id)
+        return result
+    finally:
+        conn.close()
+
+
 def list_urls() -> List[dict]:
     """List all configured URLs. Each row includes a 'labels' list (possibly empty)."""
     conn = _get_conn()
@@ -198,6 +259,7 @@ def list_urls() -> List[dict]:
         for r in rows:
             d = dict(r)
             d["labels"] = _get_url_labels(conn, d["id"])
+            d["parent_url_id"] = r["parent_url_id"]  # NULL → None in Python
             out.append(d)
         return out
     finally:
@@ -268,13 +330,35 @@ def update_url(
         conn.close()
 
 
-def delete_url(url_id: int) -> bool:
-    """Delete a URL. Returns True if deleted, False if not found."""
+def delete_url(url_id: int) -> list[str]:
+    """Delete a URL and all its discovered children (cascade).
+
+    Returns list of affected URLs for Qdrant vector cleanup.
+    Empty list if url_id not found.
+    """
     conn = _get_conn()
     try:
-        cur = conn.execute("DELETE FROM urls WHERE id = ?", (url_id,))
+        # Collect all affected URLs before deleting
+        affected = []
+        existing = conn.execute(
+            "SELECT url FROM urls WHERE id = ?", (url_id,)
+        ).fetchone()
+        if existing is None:
+            return []
+        affected.append(existing["url"])
+
+        # Find and collect child URLs
+        children = conn.execute(
+            "SELECT url FROM urls WHERE parent_url_id = ?", (url_id,)
+        ).fetchall()
+        for child in children:
+            affected.append(child["url"])
+
+        # Delete children first, then parent (FK + url_labels CASCADE)
+        conn.execute("DELETE FROM urls WHERE parent_url_id = ?", (url_id,))
+        conn.execute("DELETE FROM urls WHERE id = ?", (url_id,))
         conn.commit()
-        return cur.rowcount > 0
+        return affected
     finally:
         conn.close()
 

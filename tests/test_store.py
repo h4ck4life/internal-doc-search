@@ -154,15 +154,16 @@ def test_update_url_duplicate_raises(temp_db):
 
 
 def test_delete_url(temp_db):
-    """delete_url removes the URL."""
+    """delete_url removes the URL and returns affected URLs."""
     result = temp_db.add_url("https://example.com/docs")
-    assert temp_db.delete_url(result["id"]) is True
+    affected = temp_db.delete_url(result["id"])
+    assert affected == ["https://example.com/docs"]
     assert len(temp_db.list_urls()) == 0
 
 
 def test_delete_nonexistent_url(temp_db):
-    """delete_url returns False for missing id."""
-    assert temp_db.delete_url(999) is False
+    """delete_url returns empty list for missing id."""
+    assert temp_db.delete_url(999) == []
 
 
 def test_update_url_status(temp_db):
@@ -200,3 +201,97 @@ def test_set_config(temp_db):
     # Overwrite
     temp_db.set_config("my_key", "new_value")
     assert temp_db.get_config("my_key") == "new_value"
+
+
+# ─── add_discovered_url ────────────────────────────────────────────
+
+
+def test_add_discovered_url_creates_row(temp_db):
+    """Discovered URL is registered with correct parent_id, status, labels."""
+    seed = temp_db.add_url("https://example.com/seed", labels=["Auth", "API"])
+    child = temp_db.add_discovered_url(
+        "https://example.com/child", parent_id=seed["id"], labels=["Auth", "API"]
+    )
+    assert child is not None
+    assert child["url"] == "https://example.com/child"
+    assert child["parent_url_id"] == seed["id"]
+    assert child["status"] == "completed"
+    assert set(child["labels"]) == {"Auth", "API"}
+
+
+def test_add_discovered_url_dedup(temp_db):
+    """Adding same URL twice returns existing row unchanged (INSERT OR IGNORE)."""
+    seed = temp_db.add_url("https://example.com/seed", labels=["Auth"])
+    first = temp_db.add_discovered_url(
+        "https://example.com/child", parent_id=seed["id"], labels=["Auth"]
+    )
+    second = temp_db.add_discovered_url(
+        "https://example.com/child", parent_id=999, labels=["Other"]
+    )
+    assert first["id"] == second["id"]  # same row
+    assert second["parent_url_id"] == seed["id"]  # unchanged
+
+
+def test_add_discovered_url_without_labels(temp_db):
+    """Discovered URL with empty labels gets empty string primary label."""
+    seed = temp_db.add_url("https://example.com/seed")
+    child = temp_db.add_discovered_url(
+        "https://example.com/child", parent_id=seed["id"], labels=[]
+    )
+    assert child is not None
+    assert child["label"] == ""
+    assert child["labels"] == []
+
+
+# ─── delete_url cascade ─────────────────────────────────────────────
+
+
+def test_delete_url_cascades_to_children(temp_db):
+    """Deleting a seed URL returns all affected URLs (parent + children)."""
+    seed = temp_db.add_url("https://example.com/seed", labels=["Auth"])
+    temp_db.add_discovered_url(
+        "https://example.com/child1", parent_id=seed["id"], labels=["Auth"]
+    )
+    temp_db.add_discovered_url(
+        "https://example.com/child2", parent_id=seed["id"], labels=["Auth"]
+    )
+
+    affected = temp_db.delete_url(seed["id"])
+    assert len(affected) == 3
+    assert "https://example.com/seed" in affected
+    assert "https://example.com/child1" in affected
+    assert "https://example.com/child2" in affected
+
+    # All rows gone
+    assert temp_db.delete_url(seed["id"]) == []
+
+
+def test_delete_leaf_url_no_cascade(temp_db):
+    """Deleting a URL with no children returns only itself."""
+    seed = temp_db.add_url("https://example.com/seed", labels=["Auth"])
+    affected = temp_db.delete_url(seed["id"])
+    assert len(affected) == 1
+    assert affected[0] == "https://example.com/seed"
+
+
+def test_delete_nonexistent_returns_empty(temp_db):
+    """Deleting a non-existent URL returns empty list."""
+    assert temp_db.delete_url(999) == []
+
+
+# ─── list_urls includes parent_url_id ───────────────────────────────
+
+
+def test_list_urls_includes_parent_url_id(temp_db):
+    """list_urls returns parent_url_id (None for seeds, int for children)."""
+    seed = temp_db.add_url("https://example.com/seed", labels=["Auth"])
+    child = temp_db.add_discovered_url(
+        "https://example.com/child", parent_id=seed["id"], labels=["Auth"]
+    )
+
+    urls = temp_db.list_urls()
+    seed_row = next(u for u in urls if u["id"] == seed["id"])
+    child_row = next(u for u in urls if u["id"] == child["id"])
+
+    assert seed_row["parent_url_id"] is None
+    assert child_row["parent_url_id"] == seed["id"]

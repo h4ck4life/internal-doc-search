@@ -390,37 +390,33 @@ async def update_url_endpoint(url_id: int, body: URLUpdate):
 
 @app.delete("/urls/{url_id}")
 async def delete_url_endpoint(url_id: int):
-    """Delete a crawl URL and its vectors from Qdrant."""
-    # Get URL string before deleting from SQLite
-    urls = list_urls()
-    target = next((u for u in urls if u["id"] == url_id), None)
-    if target is None:
+    """Delete a crawl URL, its children, and all vectors from Qdrant."""
+    # Cascade delete: collects all affected URLs (parent + children)
+    affected_urls = delete_url(url_id)
+    if not affected_urls:
         raise HTTPException(status_code=404, detail="URL not found")
 
-    deleted = delete_url(url_id)
-    if not deleted:
-        raise HTTPException(status_code=404, detail="URL not found")
-
-    # Clean up vectors for this URL from Qdrant
+    # Clean up vectors for ALL affected URLs from Qdrant
     client = AsyncQdrantClient(url=QDRANT_URL, check_compatibility=False)
     try:
-        await client.delete(
-            collection_name=COLLECTION_NAME,
-            points_selector=models.FilterSelector(
-                filter=models.Filter(
-                    must=[models.FieldCondition(
-                        key="url",
-                        match=models.MatchValue(value=target["url"]),
-                    )]
-                )
-            ),
-        )
+        for url in affected_urls:
+            await client.delete(
+                collection_name=COLLECTION_NAME,
+                points_selector=models.FilterSelector(
+                    filter=models.Filter(
+                        must=[models.FieldCondition(
+                            key="url",
+                            match=models.MatchValue(value=url),
+                        )]
+                    )
+                ),
+            )
     except Exception:
         pass  # Collection might not exist yet
     finally:
         await client.close()
 
-    return {"deleted": True}
+    return {"deleted": True, "affected_urls": len(affected_urls)}
 
 
 @app.get("/config")

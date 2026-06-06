@@ -119,11 +119,11 @@ async def _crawl_single_url(
     max_depth: int,
     url_pattern: str = "",
     exclude_pattern: str = "",
-) -> List[str]:
-    """Crawl a URL. Returns list of markdown strings (one per page).
+) -> List[tuple[str, str]]:
+    """Crawl a URL. Returns list of (page_url, markdown) pairs (one per page).
 
-    url_pattern: comma-separated wildcard patterns for URLPatternFilter (e.g. "*/docs/*,*/guide/*")
-    exclude_pattern: comma-separated URL substrings to exclude from results
+    For single-page crawl, returns [(seed_url, markdown)].
+    For deep crawl, each result includes its actual URL.
     """
     if deep_crawl:
         strategy_kwargs = {
@@ -132,7 +132,6 @@ async def _crawl_single_url(
         }
         filters = []
         if url_pattern:
-            # Split comma-separated wildcard patterns
             patterns = [p.strip() for p in url_pattern.split(",") if p.strip()]
             if patterns:
                 filters.append(URLPatternFilter(patterns=patterns))
@@ -144,38 +143,33 @@ async def _crawl_single_url(
             cache_mode=CacheMode.BYPASS,
         )
         results = await crawler.arun(url=url, config=config)
-        # Build exclude pattern list (wildcard-style substring match)
         excl_pats = []
         if exclude_pattern:
             excl_pats = [p.strip() for p in exclude_pattern.split(",") if p.strip()]
 
-        markdowns = []
+        pages = []
         for r in results:
             if r.success:
                 result_url = getattr(r, "url", "") or ""
-                # Skip results whose URL matches any exclude pattern
                 if excl_pats and any(_wildcard_match(result_url, pat) for pat in excl_pats):
                     continue
-                # Prefer fit_markdown (extracts main content, strips nav/footer/sidebar).
-                # Falls back to raw markdown if fit_markdown is empty or None.
                 md = r.markdown
                 if hasattr(md, 'fit_markdown'):
                     md = md.fit_markdown or md
                 if not isinstance(md, str):
                     md = getattr(md, "raw_markdown", str(md))
-                markdowns.append(md)
-        return markdowns
+                pages.append((result_url, md))
+        return pages
     else:
         config = CrawlerRunConfig(cache_mode=CacheMode.BYPASS)
         result = await crawler.arun(url=url, config=config)
         if result.success:
-            # Prefer fit_markdown (extracts main content); fall back to raw markdown
             md = result.markdown
             if hasattr(md, 'fit_markdown'):
                 md = md.fit_markdown or md
             if not isinstance(md, str):
                 md = getattr(md, "raw_markdown", str(md))
-            return [md]
+            return [(url, md)]
         else:
             raise RuntimeError(result.error_message or "Unknown crawl error")
 
@@ -245,7 +239,7 @@ async def run_ingest(on_progress=None, only_pending: bool = False) -> Dict:
                 print(f"Crawling [{crawl_type}]: {url}")
 
                 try:
-                    markdowns = await _crawl_single_url(
+                    pages = await _crawl_single_url(
                         crawler, url, deep_crawl, max_depth,
                         url_pattern=url_pattern, exclude_pattern=exclude_pattern,
                     )
@@ -255,65 +249,74 @@ async def run_ingest(on_progress=None, only_pending: bool = False) -> Dict:
                     print(f"  FAILED: {e}")
                     continue
 
-                if not markdowns or all(not md or not md.strip() for md in markdowns):
+                if not pages or all(not md or not md.strip() for _, md in pages):
                     update_url_status(url_id, "completed", chunk_count=0)
                     print(f"  Empty page(s), skipped")
                     continue
 
-                # Chunk and embed all pages from this URL.
-                # Each chunk is replicated once per label in `url_entry["labels"]`
-                # so search filters by any one of the URL's labels match it.
+                # Labels inherited from the seed URL
                 url_labels = url_entry.get("labels") or ([label] if label else [])
                 if not url_labels:
                     url_labels = [""]  # always store at least one copy (with empty label)
 
-                # Delete old vectors for this URL before re-ingesting.
-                # Without this, re-crawling accumulates stale chunks (nav junk, old content)
-                # alongside the new cleaned chunks — upsert only adds/updates, never purges.
-                await client.delete(
-                    collection_name=COLLECTION_NAME,
-                    points_selector=models.FilterSelector(
-                        filter=models.Filter(
-                            must=[models.FieldCondition(
-                                key="url",
-                                match=models.MatchValue(value=url),
-                            )]
-                        )
-                    ),
-                )
-
-                # First pass: chunk all pages and collect metadata
+                # Process each crawled page — register discovered ones
                 all_points = []
-                page_chunks: list[list[dict]] = []  # per-page list of chunk dicts
-                page_metas: list[dict] = []          # per-page {page_title, content_type}
+                total_chunks_stored = 0
 
-                for page_idx, md_text in enumerate(markdowns):
+                for page_idx, (page_url, md_text) in enumerate(pages):
                     if not md_text or not md_text.strip():
-                        page_chunks.append([])
-                        page_metas.append({"page_title": "", "content_type": "unknown"})
                         continue
+
+                    # Determine the URL to store chunks under + track page registration
+                    if page_url == url:
+                        # Seed page — store under seed URL
+                        store_url = url
+                    else:
+                        # Discovered page — register as its own URL row
+                        from store import add_discovered_url
+                        registered = add_discovered_url(
+                            url=page_url,
+                            parent_id=url_id,
+                            labels=url_labels,
+                            deep_crawl=deep_crawl,
+                            deep_crawl_max_depth=max_depth,
+                            deep_crawl_url_pattern=url_pattern,
+                            deep_crawl_exclude_pattern=exclude_pattern,
+                        )
+                        store_url = registered["url"] if registered else page_url
+                        if registered and registered.get("id"):
+                            print(f"    Registered: {page_url}")
+
+                    # Delete old vectors for this page URL before re-ingesting
+                    await client.delete(
+                        collection_name=COLLECTION_NAME,
+                        points_selector=models.FilterSelector(
+                            filter=models.Filter(
+                                must=[models.FieldCondition(
+                                    key="url",
+                                    match=models.MatchValue(value=store_url),
+                                )]
+                            )
+                        ),
+                    )
+
                     # Extract page-level metadata
                     page_title = extract_page_title(md_text)
-                    content_type = classify_content_type(url, md_text)
-                    page_metas.append({"page_title": page_title, "content_type": content_type})
+                    content_type = classify_content_type(store_url, md_text)
 
-                    # fit_markdown already strips nav/footer/sidebar during crawl.
-                    # Token-aware chunking with section heading metadata.
+                    # Token-aware chunking with section heading metadata
                     chunks_with_meta = chunk_text_with_metadata(
                         md_text,
                         max_tokens=max_tokens,
                         overlap_tokens=overlap_tokens,
                     )
-                    page_chunks.append(chunks_with_meta)
 
-                # Compute total unique chunks across all pages for this URL
-                total_unique_chunks = sum(len(pc) for pc in page_chunks)
-
-                # Second pass: create points with full metadata
-                for page_idx, chunks_with_meta in enumerate(page_chunks):
                     if not chunks_with_meta:
                         continue
-                    meta = page_metas[page_idx]
+
+                    total_unique_chunks = len(chunks_with_meta)
+
+                    # Create points for this page
                     for chunk_idx, cm in enumerate(chunks_with_meta):
                         chunk_text_content = cm["text"]
                         section_heading = cm["section_heading"]
@@ -324,18 +327,19 @@ async def run_ingest(on_progress=None, only_pending: bool = False) -> Dict:
                                     id=str(uuid.uuid4()),
                                     vector=embedding,
                                     payload={
-                                        "url": url,
+                                        "url": store_url,
                                         "label": lbl,
                                         "chunk_index": chunk_idx,
-                                        "page_index": page_idx if len(markdowns) > 1 else 0,
+                                        "page_index": page_idx,
                                         "content": chunk_text_content,
-                                        "page_title": meta["page_title"],
+                                        "page_title": page_title,
                                         "section_heading": section_heading,
-                                        "content_type": meta["content_type"],
+                                        "content_type": content_type,
                                         "total_chunks": total_unique_chunks,
                                     },
                                 )
                             )
+                    total_chunks_stored += len(chunks_with_meta)
 
                 if all_points:
                     await client.upsert(collection_name=COLLECTION_NAME, points=all_points)
@@ -343,7 +347,7 @@ async def run_ingest(on_progress=None, only_pending: bool = False) -> Dict:
                 update_url_status(url_id, "completed", chunk_count=len(all_points))
                 total_urls += 1
                 total_chunks += len(all_points)
-                pages_info = f" ({len(markdowns)} pages)" if len(markdowns) > 1 else ""
+                pages_info = f" ({len(pages)} pages)" if len(pages) > 1 else ""
                 print(f"  Saved {len(all_points)} chunks from {url}{pages_info}")
 
                 if on_progress:

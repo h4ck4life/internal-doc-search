@@ -426,7 +426,8 @@ def test_delete_url(client):
 
     response = client.delete(f"/urls/{created['id']}")
     assert response.status_code == 200
-    assert response.json() == {"deleted": True}
+    assert response.json()["deleted"] is True
+    assert response.json()["affected_urls"] == 1
 
     # Verify it's gone
     response = client.get("/urls")
