@@ -211,7 +211,7 @@ async def run_ingest(on_progress=None, only_pending: bool = False) -> Dict:
     browser_config = BrowserConfig(
         headless=True,
         verbose=False,
-        extra_args=["--disable-dev-shm-usage", "--no-sandbox"],
+        extra_args=["--disable-dev-shm-usage", "--no-sandbox", "--ignore-certificate-errors"],
     )
 
     total_urls = 0
