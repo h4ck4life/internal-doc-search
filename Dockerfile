@@ -7,11 +7,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# ── Install CPU-only PyTorch FIRST ────────────────────────────────
+# sentence-transformers depends on torch; pre-installing the CPU wheel
+# (~180 MB) prevents pip from downloading the CUDA wheel (~426 MB).
+# Use BuildKit cache mount so pip packages survive rebuilds.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --cache-dir /root/.cache/pip \
+    torch --index-url https://download.pytorch.org/whl/cpu
 
-# Install Playwright browsers for Crawl4AI
-RUN python -m playwright install --with-deps chromium
+# ── Install remaining Python deps ─────────────────────────────────
+COPY requirements.txt .
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --cache-dir /root/.cache/pip -r requirements.txt
+
+# ── Install Playwright Chromium (cached between builds) ───────────
+RUN --mount=type=cache,target=/root/.cache/ms-playwright \
+    python -m playwright install --with-deps chromium
 
 COPY api.py ingest.py store.py chunker.py mcp_server.py ./
 COPY static/ static/
