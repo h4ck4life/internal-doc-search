@@ -457,8 +457,9 @@
       </p>
 
       <h3 class="text-base font-semibold mt-4 mb-2">Claude Code</h3>
-      <p class="text-sm text-muted mb-2">Create <code class="text-gray-300 bg-gray-800 px-1.5 py-0.5 rounded text-xs">.mcp.json</code>
-         in your project root or add to <code class="text-gray-300 bg-gray-800 px-1.5 py-0.5 rounded text-xs">~/.claude/claude_desktop_config.json</code>:</p>
+      <p class="text-sm text-muted mb-2"><strong>Option A — CLI (adds globally):</strong></p>
+      <pre class="text-xs p-4 rounded-lg bg-gray-950 border border-border overflow-x-auto"><code>claude mcp add --transport http doc-search http://localhost:8000/mcp/</code></pre>
+      <p class="text-sm text-muted mt-3 mb-2"><strong>Option B — Project <code class="text-gray-300 bg-gray-800 px-1.5 py-0.5 rounded text-xs">.mcp.json</code></strong> (auto-connects when Claude Code opens this repo):</p>
       <pre class="text-xs p-4 rounded-lg bg-gray-950 border border-border overflow-x-auto"><code>{
   "mcpServers": {
     "doc-search": {
