@@ -50,6 +50,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ENV PLAYWRIGHT_BROWSERS_PATH=/app/.cache/ms-playwright
 RUN python -m playwright install chromium
 
+# ── Stage: download HuggingFace models ONCE ─────────────────────
+FROM base AS models
+ENV HF_HOME=/app/.cache/huggingface
+RUN python -c "
+from sentence_transformers import SentenceTransformer, CrossEncoder
+SentenceTransformer('multi-qa-mpnet-base-cos-v1')
+CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
+"
+
 # ── Runtime stage ────────────────────────────────────────────────
 FROM base
 
@@ -69,6 +78,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # /app/.cache/ms-playwright doesn't shadow it. The entrypoint script
 # copies this .image copy into the volume location on first start.
 COPY --from=browsers /app/.cache/ms-playwright /app/.cache/ms-playwright.image
+
+# Same pattern for HuggingFace models — baked at build time so users
+# don't wait 2-3 minutes for 400MB+ downloads on first start.
+COPY --from=models /app/.cache/huggingface /app/.cache/huggingface.image
 
 # Copy all top-level Python files and the URLs list. New modules are
 # picked up automatically — no need to edit this list per file.

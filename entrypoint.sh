@@ -28,4 +28,15 @@ if [ -d "$IMAGE_BROWSERS" ] && [ ! -d "$BROWSERS_PATH" ]; then
     echo "[entrypoint] Browser ready at $BROWSERS_PATH"
 fi
 
+# Same pattern for HuggingFace models (~420 MB) — avoid 2-3 minute
+# download on first container start.
+HF_PATH="${HF_HOME:-/app/.cache/huggingface}"
+IMAGE_HF="/app/.cache/huggingface.image"
+if [ -d "$IMAGE_HF" ] && [ ! -d "$HF_PATH" ]; then
+    echo "[entrypoint] Seeding HuggingFace models from image copy (~420 MB)..."
+    mkdir -p "$(dirname "$HF_PATH")"
+    cp -a "$IMAGE_HF" "$HF_PATH"
+    echo "[entrypoint] Models ready at $HF_PATH"
+fi
+
 exec "$@"
