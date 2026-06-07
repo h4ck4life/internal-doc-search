@@ -1,3 +1,8 @@
+# Development compose file — builds from local source instead of pulling
+# the published image. Use this when you're modifying code.
+#
+#   docker compose -f docker-compose.dev.yml up -d
+
 services:
   qdrant:
     image: qdrant/qdrant:v1.15.2
@@ -9,19 +14,13 @@ services:
       - qdrant_data:/qdrant/storage
 
   api:
-    image: ghcr.io/h4ck4life/docsearch-api:latest
+    build: .
     container_name: internal-doc-api
     restart: always
     ports:
       - "8000:8000"
     volumes:
       - ./data:/app/data
-      # ./.cache holds BOTH the HuggingFace model cache (HF_HOME) AND the
-      # Playwright Chromium binary (PLAYWRIGHT_BROWSERS_PATH), so
-      # restarts/upgrades don't redownload either. The browser is also
-      # baked into the image via the multi-stage Dockerfile, so the
-      # first run works even if ./cache is empty. Keep this directory
-      # in your .gitignore (already done).
       - ./.cache:/app/.cache
     depends_on:
       - qdrant
