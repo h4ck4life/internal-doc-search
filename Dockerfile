@@ -53,11 +53,9 @@ RUN python -m playwright install chromium
 # ── Stage: download HuggingFace models ONCE ─────────────────────
 FROM base AS models
 ENV HF_HOME=/app/.cache/huggingface
-RUN python -c "
-from sentence_transformers import SentenceTransformer, CrossEncoder
-SentenceTransformer('multi-qa-mpnet-base-cos-v1')
-CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
-"
+# Download bi-encoder + cross-encoder (~420 MB) so users don't wait on first start.
+# Same pattern as browsers stage — cached layer survives code-only rebuilds.
+RUN python -c "from sentence_transformers import SentenceTransformer, CrossEncoder; SentenceTransformer('multi-qa-mpnet-base-cos-v1'); CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')"
 
 # ── Runtime stage ────────────────────────────────────────────────
 FROM base
