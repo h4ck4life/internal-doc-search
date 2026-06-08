@@ -11,10 +11,17 @@ FROM python:3.11-slim AS base
 
 WORKDIR /app
 
-# Install system deps for Crawl4AI (Playwright) and the build tools we'll
-# need in the browsers stage.
+# Keep Python/pip from writing avoidable files into image layers.
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_ROOT_USER_ACTION=ignore
+
+# Install the OS libraries Chromium needs once in the shared base. Both
+# the browser-install stage and the runtime stage inherit these files.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
+    libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 \
+    libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 \
+    libcairo2 libasound2 libatspi2.0-0 fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Install CPU-only PyTorch FIRST ────────────────────────────────
@@ -22,13 +29,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # (~180 MB) prevents pip from downloading the CUDA wheel (~426 MB).
 # Use BuildKit cache mount so pip packages survive rebuilds with buildx.
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --cache-dir /root/.cache/pip \
+    pip install --no-compile --cache-dir /root/.cache/pip \
     torch --index-url https://download.pytorch.org/whl/cpu
 
 # ── Install remaining Python deps ─────────────────────────────────
 COPY requirements.txt .
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --cache-dir /root/.cache/pip -r requirements.txt
+    pip install --no-compile --cache-dir /root/.cache/pip -r requirements.txt
 
 # ── Stage: install Playwright Chromium ONCE ──────────────────────
 # Install to /app/.cache/ms-playwright (the real stage path) so the
@@ -39,14 +46,6 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # amortized by the layer cache: as long as requirements.txt and the
 # base image haven't changed, the install RUN is a no-op CACHED step.
 FROM base AS browsers
-# Install the OS libraries Chromium needs (libnss3, libatk1.0, libgbm,
-# etc.) so `playwright install` doesn't need `--with-deps` (which would
-# call apt-get itself, complicating the layer graph).
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 \
-    libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 \
-    libcairo2 libasound2 libatspi2.0-0 fonts-liberation \
-    && rm -rf /var/lib/apt/lists/*
 ENV PLAYWRIGHT_BROWSERS_PATH=/app/.cache/ms-playwright
 RUN python -m playwright install chromium
 
@@ -59,17 +58,6 @@ RUN python -c "from sentence_transformers import SentenceTransformer, CrossEncod
 
 # ── Runtime stage ────────────────────────────────────────────────
 FROM base
-
-# Install Chromium's runtime libraries (libnss3, libgbm, libatk, …) so
-# the Playwright browser can launch at runtime. We install these in the
-# final image rather than copying from the browsers stage because they
-# live in /usr/lib, which the base image already provides — only the
-# browser binary at /app/.cache/ms-playwright is build-time-only state.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 \
-    libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 \
-    libcairo2 libasound2 libatspi2.0-0 fonts-liberation \
-    && rm -rf /var/lib/apt/lists/*
 
 # Copy the Playwright browsers from the previous stage directly into the
 # runtime image at the path PLAYWRIGHT_BROWSERS_PATH points to. The image
@@ -93,6 +81,8 @@ RUN mkdir -p /app/data
 # Only the SQLite database is persisted (see docker-compose.yml).
 ENV HF_HOME=/app/.cache/huggingface
 ENV PLAYWRIGHT_BROWSERS_PATH=/app/.cache/ms-playwright
+ENV HF_HUB_OFFLINE=1
+ENV TRANSFORMERS_OFFLINE=1
 
 EXPOSE 8000
 

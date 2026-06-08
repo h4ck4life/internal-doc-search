@@ -12,7 +12,9 @@ logger = logging.getLogger(__name__)
 
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
 from crawl4ai.deep_crawling import BFSDeepCrawlStrategy
-from crawl4ai.deep_crawling.filters import FilterChain, URLPatternFilter
+from crawl4ai.deep_crawling.filters import ContentTypeFilter, FilterChain, URLPatternFilter
+from crawl4ai.content_filter_strategy import PruningContentFilter
+from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
 from qdrant_client import AsyncQdrantClient, models
 from sentence_transformers import SentenceTransformer
 
@@ -26,14 +28,86 @@ from store import (
 
 from shared import QDRANT_URL, COLLECTION_NAME
 
-# SPA-friendly crawl waits: Angular/React apps render after the initial HTML,
-# so wait for the network to settle and give the framework time to paint before
-# we capture the page. Tunable via env so retuning needs no code change.
+# SPA-friendly crawl defaults: Angular/React apps render after the initial HTML,
+# lazy-load during scroll, and sometimes hide content behind overlays or Shadow
+# DOM. Tunable via env so retuning needs no code change.
 CRAWL_WAIT_UNTIL = os.environ.get("CRAWL_WAIT_UNTIL", "networkidle")
 CRAWL_DELAY_BEFORE_HTML = float(os.environ.get("CRAWL_DELAY_BEFORE_HTML", "2.0"))
 CRAWL_PAGE_TIMEOUT_MS = int(os.environ.get("CRAWL_PAGE_TIMEOUT_MS", "60000"))
+CRAWL_WORD_COUNT_THRESHOLD = int(os.environ.get("CRAWL_WORD_COUNT_THRESHOLD", "1"))
+CRAWL_PRUNE_THRESHOLD = float(os.environ.get("CRAWL_PRUNE_THRESHOLD", "0.35"))
+CRAWL_SCROLL_DELAY = float(os.environ.get("CRAWL_SCROLL_DELAY", "0.2"))
+CRAWL_MAX_SCROLL_STEPS = int(os.environ.get("CRAWL_MAX_SCROLL_STEPS", "15"))
+CRAWL_DEEP_MAX_PAGES = int(os.environ.get("CRAWL_DEEP_MAX_PAGES", "500"))
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_optional_int(name: str, default: int) -> Optional[int]:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    value = value.strip()
+    if not value or value.lower() in {"none", "null", "unlimited", "0"}:
+        return None
+    return int(value)
+
+
+CRAWL_USE_CONTENT_FILTER = _env_bool("CRAWL_USE_CONTENT_FILTER", True)
+CRAWL_SCAN_FULL_PAGE = _env_bool("CRAWL_SCAN_FULL_PAGE", True)
+CRAWL_PROCESS_IFRAMES = _env_bool("CRAWL_PROCESS_IFRAMES", True)
+CRAWL_FLATTEN_SHADOW_DOM = _env_bool("CRAWL_FLATTEN_SHADOW_DOM", True)
+CRAWL_REMOVE_OVERLAYS = _env_bool("CRAWL_REMOVE_OVERLAYS", True)
+CRAWL_REMOVE_CONSENT_POPUPS = _env_bool("CRAWL_REMOVE_CONSENT_POPUPS", True)
+CRAWL_SIMULATE_USER = _env_bool("CRAWL_SIMULATE_USER", False)
+CRAWL_MAGIC = _env_bool("CRAWL_MAGIC", False)
+CRAWL_OVERRIDE_NAVIGATOR = _env_bool("CRAWL_OVERRIDE_NAVIGATOR", False)
 
 _model: Optional[SentenceTransformer] = None
+
+
+def _markdown_generator() -> DefaultMarkdownGenerator:
+    if not CRAWL_USE_CONTENT_FILTER:
+        return DefaultMarkdownGenerator()
+    return DefaultMarkdownGenerator(
+        content_filter=PruningContentFilter(
+            threshold=CRAWL_PRUNE_THRESHOLD,
+            threshold_type="fixed",
+        )
+    )
+
+
+def _crawler_run_config(deep_crawl_strategy=None) -> CrawlerRunConfig:
+    wait_for = os.environ.get("CRAWL_WAIT_FOR_SELECTOR") or None
+    return CrawlerRunConfig(
+        cache_mode=CacheMode.BYPASS,
+        markdown_generator=_markdown_generator(),
+        word_count_threshold=CRAWL_WORD_COUNT_THRESHOLD,
+        wait_until=CRAWL_WAIT_UNTIL,
+        wait_for=wait_for,
+        delay_before_return_html=CRAWL_DELAY_BEFORE_HTML,
+        page_timeout=CRAWL_PAGE_TIMEOUT_MS,
+        scan_full_page=CRAWL_SCAN_FULL_PAGE,
+        scroll_delay=CRAWL_SCROLL_DELAY,
+        max_scroll_steps=_env_optional_int("CRAWL_MAX_SCROLL_STEPS", CRAWL_MAX_SCROLL_STEPS),
+        process_iframes=CRAWL_PROCESS_IFRAMES,
+        flatten_shadow_dom=CRAWL_FLATTEN_SHADOW_DOM,
+        remove_overlay_elements=CRAWL_REMOVE_OVERLAYS,
+        remove_consent_popups=CRAWL_REMOVE_CONSENT_POPUPS,
+        simulate_user=CRAWL_SIMULATE_USER,
+        magic=CRAWL_MAGIC,
+        override_navigator=CRAWL_OVERRIDE_NAVIGATOR,
+        remove_forms=True,
+        exclude_external_links=True,
+        exclude_social_media_links=True,
+        exclude_external_images=True,
+        deep_crawl_strategy=deep_crawl_strategy,
+    )
 
 
 def _get_model() -> SentenceTransformer:
@@ -137,15 +211,14 @@ async def _crawl_single_url(
             patterns = [p.strip() for p in url_pattern.split(",") if p.strip()]
             if patterns:
                 filters.append(URLPatternFilter(patterns=patterns))
+        filters.append(ContentTypeFilter(["text/html", "application/xhtml+xml"]))
         if filters:
             strategy_kwargs["filter_chain"] = FilterChain(filters)
+        if CRAWL_DEEP_MAX_PAGES > 0:
+            strategy_kwargs["max_pages"] = CRAWL_DEEP_MAX_PAGES
 
-        config = CrawlerRunConfig(
-            deep_crawl_strategy=BFSDeepCrawlStrategy(**strategy_kwargs),
-            cache_mode=CacheMode.BYPASS,
-            wait_until=CRAWL_WAIT_UNTIL,
-            delay_before_return_html=CRAWL_DELAY_BEFORE_HTML,
-            page_timeout=CRAWL_PAGE_TIMEOUT_MS,
+        config = _crawler_run_config(
+            deep_crawl_strategy=BFSDeepCrawlStrategy(**strategy_kwargs)
         )
         results = await crawler.arun(url=url, config=config)
         excl_pats = []
@@ -166,12 +239,7 @@ async def _crawl_single_url(
                 pages.append((result_url, md))
         return pages
     else:
-        config = CrawlerRunConfig(
-            cache_mode=CacheMode.BYPASS,
-            wait_until=CRAWL_WAIT_UNTIL,
-            delay_before_return_html=CRAWL_DELAY_BEFORE_HTML,
-            page_timeout=CRAWL_PAGE_TIMEOUT_MS,
-        )
+        config = _crawler_run_config()
         result = await crawler.arun(url=url, config=config)
         if result.success:
             md = result.markdown
@@ -228,7 +296,18 @@ async def run_ingest(on_progress=None, only_pending: bool = False, url_id: Optio
     browser_config = BrowserConfig(
         headless=True,
         verbose=False,
-        extra_args=["--disable-dev-shm-usage", "--no-sandbox", "--ignore-certificate-errors"],
+        ignore_https_errors=True,
+        java_script_enabled=True,
+        viewport_width=1366,
+        viewport_height=900,
+        user_agent_mode=os.environ.get("CRAWL_USER_AGENT_MODE", "random"),
+        enable_stealth=CRAWL_OVERRIDE_NAVIGATOR or CRAWL_MAGIC,
+        extra_args=[
+            "--disable-dev-shm-usage",
+            "--no-sandbox",
+            "--ignore-certificate-errors",
+            "--disable-blink-features=AutomationControlled",
+        ],
     )
 
     total_urls = 0

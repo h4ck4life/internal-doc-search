@@ -265,6 +265,22 @@ These are read at startup and override defaults. Set them in your shell or in `d
 | `CRAWL_WAIT_UNTIL` | `networkidle` | Playwright wait strategy. Use `load` if `networkidle` stalls on long-polling/WebSocket SPAs. Other values: `domcontentloaded`, `commit`. |
 | `CRAWL_DELAY_BEFORE_HTML` | `2.0` | Seconds to wait after page load before capturing HTML. Bump to 3–4 if the app is slow to paint (lazy-rendered content). |
 | `CRAWL_PAGE_TIMEOUT_MS` | `60000` | Page load timeout in milliseconds. Raise if you start seeing timeouts from longer waits (e.g., `120000` for 2 min). |
+| `CRAWL_WAIT_FOR_SELECTOR` | (unset) | Optional CSS selector to wait for before capture, e.g. `main`, `article`, or `#root .docs-content`. Useful when an SPA paints content after network idle. |
+| `CRAWL_WORD_COUNT_THRESHOLD` | `1` | Minimum words for retained text blocks. Kept low so API reference fragments and short headings are not dropped. |
+| `CRAWL_USE_CONTENT_FILTER` | `true` | Enables Crawl4AI's markdown content pruning so `fit_markdown` prefers main content over nav/footer/sidebar boilerplate. Set `false` if a site loses important content. |
+| `CRAWL_PRUNE_THRESHOLD` | `0.35` | Conservative pruning threshold. Raise toward `0.48` to remove more boilerplate; lower if code/reference sections disappear. |
+| `CRAWL_SCAN_FULL_PAGE` | `true` | Scrolls through the page before extracting HTML. Helps lazy-loaded docs, infinite sections, and SPA route content. |
+| `CRAWL_SCROLL_DELAY` | `0.2` | Delay between scroll steps in seconds. Increase for slow lazy-loading pages. |
+| `CRAWL_MAX_SCROLL_STEPS` | `15` | Max full-page scroll steps. Use `0` for unlimited, or lower it for very long pages where crawl time matters. |
+| `CRAWL_PROCESS_IFRAMES` | `true` | Extracts iframe content when present. Useful for embedded docs/examples; disable if third-party iframes add noise. |
+| `CRAWL_FLATTEN_SHADOW_DOM` | `true` | Pulls Shadow DOM text into the extracted page, useful for web-component docs and SPA shells. |
+| `CRAWL_REMOVE_OVERLAYS` | `true` | Removes modal/overlay elements before extraction. Helps cookie banners, newsletter popups, and interstitials. |
+| `CRAWL_REMOVE_CONSENT_POPUPS` | `true` | Specifically tries to remove consent popups before extraction. |
+| `CRAWL_SIMULATE_USER` | `false` | Simulates user interaction. Leave off for deterministic docs crawling; enable only for sites that reveal content after interaction. |
+| `CRAWL_MAGIC` | `false` | Crawl4AI convenience mode for extra interaction/anti-bot behavior. Leave off by default; enable for difficult SPAs after normal waits fail. |
+| `CRAWL_OVERRIDE_NAVIGATOR` | `false` | Adjusts browser navigator signals. Enable only for sites blocking automated browsers. |
+| `CRAWL_DEEP_MAX_PAGES` | `500` | Safety cap for one deep-crawl seed. Set `0` for unlimited, or reduce for broad sites. |
+| `CRAWL_USER_AGENT_MODE` | `random` | Crawl4AI browser user-agent mode. `random` avoids a stale fixed UA while keeping normal Chromium behavior. |
 
 ### Infrastructure
 

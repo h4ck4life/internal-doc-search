@@ -133,6 +133,26 @@ services:
       # image — no host bind mount for /app/.cache is needed.
     environment:
       - QDRANT_URL=http://qdrant:6333
+      - HF_HUB_OFFLINE=1
+      - TRANSFORMERS_OFFLINE=1
+      - CRAWL_WAIT_UNTIL=networkidle
+      - CRAWL_DELAY_BEFORE_HTML=2.0
+      - CRAWL_PAGE_TIMEOUT_MS=60000
+      - CRAWL_WORD_COUNT_THRESHOLD=1
+      - CRAWL_USE_CONTENT_FILTER=true
+      - CRAWL_PRUNE_THRESHOLD=0.35
+      - CRAWL_SCAN_FULL_PAGE=true
+      - CRAWL_SCROLL_DELAY=0.2
+      - CRAWL_MAX_SCROLL_STEPS=15
+      - CRAWL_PROCESS_IFRAMES=true
+      - CRAWL_FLATTEN_SHADOW_DOM=true
+      - CRAWL_REMOVE_OVERLAYS=true
+      - CRAWL_REMOVE_CONSENT_POPUPS=true
+      - CRAWL_SIMULATE_USER=false
+      - CRAWL_MAGIC=false
+      - CRAWL_OVERRIDE_NAVIGATOR=false
+      - CRAWL_DEEP_MAX_PAGES=500
+      - CRAWL_USER_AGENT_MODE=random
     shm_size: '2gb'
 
 volumes:
