@@ -129,7 +129,8 @@ services:
       - "8000:8000"
     volumes:
       - ./data:/app/data
-      - ./.cache:/app/.cache
+      # Playwright Chromium and HuggingFace models are baked into the
+      # image — no host bind mount for /app/.cache is needed.
     environment:
       - QDRANT_URL=http://qdrant:6333
     shm_size: '2gb'
