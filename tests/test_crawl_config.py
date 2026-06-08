@@ -18,7 +18,7 @@ def test_crawler_run_config_defaults_are_spa_friendly():
     config = ingest._crawler_run_config()
 
     assert config.cache_mode.value == "bypass"
-    assert config.wait_until == "networkidle"
+    assert config.wait_until == "load"
     assert config.delay_before_return_html == 2.0
     assert config.page_timeout == 60000
     assert config.word_count_threshold == 1
@@ -28,6 +28,10 @@ def test_crawler_run_config_defaults_are_spa_friendly():
     assert config.flatten_shadow_dom is True
     assert config.remove_overlay_elements is True
     assert config.remove_consent_popups is True
+    assert config.max_retries == 2
+    assert config.simulate_user is True
+    assert config.magic is True
+    assert config.override_navigator is True
     assert config.exclude_external_links is True
     assert config.exclude_social_media_links is True
     assert config.exclude_external_images is True

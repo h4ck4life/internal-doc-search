@@ -1,6 +1,7 @@
 """Ingestion pipeline: crawl docs → extract metadata → chunk → embed → store in Qdrant."""
 
 import asyncio
+import inspect
 import logging
 import os
 import re
@@ -31,9 +32,10 @@ from shared import QDRANT_URL, COLLECTION_NAME
 # SPA-friendly crawl defaults: Angular/React apps render after the initial HTML,
 # lazy-load during scroll, and sometimes hide content behind overlays or Shadow
 # DOM. Tunable via env so retuning needs no code change.
-CRAWL_WAIT_UNTIL = os.environ.get("CRAWL_WAIT_UNTIL", "networkidle")
+CRAWL_WAIT_UNTIL = os.environ.get("CRAWL_WAIT_UNTIL", "load")
 CRAWL_DELAY_BEFORE_HTML = float(os.environ.get("CRAWL_DELAY_BEFORE_HTML", "2.0"))
 CRAWL_PAGE_TIMEOUT_MS = int(os.environ.get("CRAWL_PAGE_TIMEOUT_MS", "60000"))
+CRAWL_MAX_RETRIES = int(os.environ.get("CRAWL_MAX_RETRIES", "2"))
 CRAWL_WORD_COUNT_THRESHOLD = int(os.environ.get("CRAWL_WORD_COUNT_THRESHOLD", "1"))
 CRAWL_PRUNE_THRESHOLD = float(os.environ.get("CRAWL_PRUNE_THRESHOLD", "0.35"))
 CRAWL_SCROLL_DELAY = float(os.environ.get("CRAWL_SCROLL_DELAY", "0.2"))
@@ -64,11 +66,24 @@ CRAWL_PROCESS_IFRAMES = _env_bool("CRAWL_PROCESS_IFRAMES", True)
 CRAWL_FLATTEN_SHADOW_DOM = _env_bool("CRAWL_FLATTEN_SHADOW_DOM", True)
 CRAWL_REMOVE_OVERLAYS = _env_bool("CRAWL_REMOVE_OVERLAYS", True)
 CRAWL_REMOVE_CONSENT_POPUPS = _env_bool("CRAWL_REMOVE_CONSENT_POPUPS", True)
-CRAWL_SIMULATE_USER = _env_bool("CRAWL_SIMULATE_USER", False)
-CRAWL_MAGIC = _env_bool("CRAWL_MAGIC", False)
-CRAWL_OVERRIDE_NAVIGATOR = _env_bool("CRAWL_OVERRIDE_NAVIGATOR", False)
+CRAWL_SIMULATE_USER = _env_bool("CRAWL_SIMULATE_USER", True)
+CRAWL_MAGIC = _env_bool("CRAWL_MAGIC", True)
+CRAWL_OVERRIDE_NAVIGATOR = _env_bool("CRAWL_OVERRIDE_NAVIGATOR", True)
+CRAWL_ENABLE_STEALTH = _env_bool("CRAWL_ENABLE_STEALTH", True)
+CRAWL_USER_AGENT_MODE = os.environ.get("CRAWL_USER_AGENT_MODE", "random")
 
 _model: Optional[SentenceTransformer] = None
+
+
+def _supported_kwargs(callable_obj, kwargs: Dict) -> Dict:
+    """Drop config kwargs unsupported by the installed Crawl4AI version."""
+    try:
+        params = inspect.signature(callable_obj).parameters
+    except (TypeError, ValueError):
+        return kwargs
+    if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return kwargs
+    return {k: v for k, v in kwargs.items() if k in params}
 
 
 def _markdown_generator() -> DefaultMarkdownGenerator:
@@ -84,30 +99,32 @@ def _markdown_generator() -> DefaultMarkdownGenerator:
 
 def _crawler_run_config(deep_crawl_strategy=None) -> CrawlerRunConfig:
     wait_for = os.environ.get("CRAWL_WAIT_FOR_SELECTOR") or None
-    return CrawlerRunConfig(
-        cache_mode=CacheMode.BYPASS,
-        markdown_generator=_markdown_generator(),
-        word_count_threshold=CRAWL_WORD_COUNT_THRESHOLD,
-        wait_until=CRAWL_WAIT_UNTIL,
-        wait_for=wait_for,
-        delay_before_return_html=CRAWL_DELAY_BEFORE_HTML,
-        page_timeout=CRAWL_PAGE_TIMEOUT_MS,
-        scan_full_page=CRAWL_SCAN_FULL_PAGE,
-        scroll_delay=CRAWL_SCROLL_DELAY,
-        max_scroll_steps=_env_optional_int("CRAWL_MAX_SCROLL_STEPS", CRAWL_MAX_SCROLL_STEPS),
-        process_iframes=CRAWL_PROCESS_IFRAMES,
-        flatten_shadow_dom=CRAWL_FLATTEN_SHADOW_DOM,
-        remove_overlay_elements=CRAWL_REMOVE_OVERLAYS,
-        remove_consent_popups=CRAWL_REMOVE_CONSENT_POPUPS,
-        simulate_user=CRAWL_SIMULATE_USER,
-        magic=CRAWL_MAGIC,
-        override_navigator=CRAWL_OVERRIDE_NAVIGATOR,
-        remove_forms=True,
-        exclude_external_links=True,
-        exclude_social_media_links=True,
-        exclude_external_images=True,
-        deep_crawl_strategy=deep_crawl_strategy,
-    )
+    kwargs = {
+        "cache_mode": CacheMode.BYPASS,
+        "markdown_generator": _markdown_generator(),
+        "word_count_threshold": CRAWL_WORD_COUNT_THRESHOLD,
+        "wait_until": CRAWL_WAIT_UNTIL,
+        "wait_for": wait_for,
+        "delay_before_return_html": CRAWL_DELAY_BEFORE_HTML,
+        "page_timeout": CRAWL_PAGE_TIMEOUT_MS,
+        "max_retries": CRAWL_MAX_RETRIES,
+        "scan_full_page": CRAWL_SCAN_FULL_PAGE,
+        "scroll_delay": CRAWL_SCROLL_DELAY,
+        "max_scroll_steps": _env_optional_int("CRAWL_MAX_SCROLL_STEPS", CRAWL_MAX_SCROLL_STEPS),
+        "process_iframes": CRAWL_PROCESS_IFRAMES,
+        "flatten_shadow_dom": CRAWL_FLATTEN_SHADOW_DOM,
+        "remove_overlay_elements": CRAWL_REMOVE_OVERLAYS,
+        "remove_consent_popups": CRAWL_REMOVE_CONSENT_POPUPS,
+        "simulate_user": CRAWL_SIMULATE_USER,
+        "magic": CRAWL_MAGIC,
+        "override_navigator": CRAWL_OVERRIDE_NAVIGATOR,
+        "remove_forms": True,
+        "exclude_external_links": True,
+        "exclude_social_media_links": True,
+        "exclude_external_images": True,
+        "deep_crawl_strategy": deep_crawl_strategy,
+    }
+    return CrawlerRunConfig(**_supported_kwargs(CrawlerRunConfig, kwargs))
 
 
 def _get_model() -> SentenceTransformer:
@@ -186,7 +203,6 @@ def classify_content_type(url: str, markdown: str) -> str:
         return "conceptual"
 
     return "unknown"
-
 
 async def _crawl_single_url(
     crawler: AsyncWebCrawler,
@@ -293,22 +309,23 @@ async def run_ingest(on_progress=None, only_pending: bool = False, url_id: Optio
 
     await _ensure_collection(client)
 
-    browser_config = BrowserConfig(
-        headless=True,
-        verbose=False,
-        ignore_https_errors=True,
-        java_script_enabled=True,
-        viewport_width=1366,
-        viewport_height=900,
-        user_agent_mode=os.environ.get("CRAWL_USER_AGENT_MODE", "random"),
-        enable_stealth=CRAWL_OVERRIDE_NAVIGATOR or CRAWL_MAGIC,
-        extra_args=[
+    browser_kwargs = {
+        "headless": True,
+        "verbose": False,
+        "ignore_https_errors": True,
+        "java_script_enabled": True,
+        "viewport_width": 1366,
+        "viewport_height": 900,
+        "enable_stealth": CRAWL_ENABLE_STEALTH,
+        "user_agent_mode": CRAWL_USER_AGENT_MODE,
+        "extra_args": [
             "--disable-dev-shm-usage",
             "--no-sandbox",
             "--ignore-certificate-errors",
             "--disable-blink-features=AutomationControlled",
         ],
-    )
+    }
+    browser_config = BrowserConfig(**_supported_kwargs(BrowserConfig, browser_kwargs))
 
     total_urls = 0
     total_chunks = 0
