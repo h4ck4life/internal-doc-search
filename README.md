@@ -53,6 +53,8 @@ curl -X POST http://localhost:8000/urls \
   -d '{"url": "https://docs.example.com/auth/", "labels": ["Auth", "API Docs"]}'
 ```
 
+**Bulk import**: Edit `urls.txt` (one URL per line, `#` for comments) and run `python ingest.py`. The CLI reads from `urls.txt` directly.
+
 ### 4. Run ingestion
 
 ```bash
@@ -252,6 +254,34 @@ curl -s -X POST http://localhost:8000/mcp/ \
 
 All configurable via the dashboard UI or `PUT /config`.
 
+## Environment Variables
+
+These are read at startup and override defaults. Set them in your shell or in `docker-compose.yml`.
+
+### Crawl Tuning
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CRAWL_WAIT_UNTIL` | `networkidle` | Playwright wait strategy. Use `load` if `networkidle` stalls on long-polling/WebSocket SPAs. Other values: `domcontentloaded`, `commit`. |
+| `CRAWL_DELAY_BEFORE_HTML` | `2.0` | Seconds to wait after page load before capturing HTML. Bump to 3–4 if the app is slow to paint (lazy-rendered content). |
+| `CRAWL_PAGE_TIMEOUT_MS` | `60000` | Page load timeout in milliseconds. Raise if you start seeing timeouts from longer waits (e.g., `120000` for 2 min). |
+
+### Infrastructure
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `QDRANT_URL` | `http://localhost:6333` | Qdrant vector DB URL. Set to `http://qdrant:6333` in Docker Compose (service name). |
+| `DATA_DIR` | `data` | Directory for the SQLite database (`config.db`). Persisted as a volume in Docker. |
+
+### Docker / Offline Mode
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HF_HUB_OFFLINE` | (unset) | Set to `1` in Docker to force HuggingFace Hub to use only locally cached models — no HEAD/etag calls to huggingface.co. |
+| `TRANSFORMERS_OFFLINE` | (unset) | Set to `1` in Docker to prevent transformers from attempting remote downloads. |
+
+The Docker Compose file pre-sets `HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1` because models are baked into the image at build time (see [CONTAINER.md](CONTAINER.md)).
+
 ## Deep Crawl Auto-Registration
 
 When deep crawl is enabled, discovered pages are automatically registered as their own URL records with `parent_url_id` pointing to the seed. This means:
@@ -268,6 +298,8 @@ docker compose up -d
 ```
 
 Both Qdrant and API will start. Web UI at `http://localhost:8000`, MCP at `http://localhost:8000/mcp/`. HF models cached at `./.cache`, database at `./data/`.
+
+See [CONTAINER.md](CONTAINER.md) for the published image guide, multi-arch build instructions, and image size breakdown.
 
 ## Running Tests
 
