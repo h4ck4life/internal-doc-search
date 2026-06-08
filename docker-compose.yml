@@ -25,6 +25,11 @@ services:
     shm_size: '2gb'
     environment:
       - QDRANT_URL=http://qdrant:6333
+      # Models are baked into the image. Force offline so huggingface_hub
+      # uses the local cache only and never makes HEAD/etag calls to
+      # huggingface.co (which fail behind the corporate TLS proxy).
+      - HF_HUB_OFFLINE=1
+      - TRANSFORMERS_OFFLINE=1
 
 volumes:
   qdrant_data:
