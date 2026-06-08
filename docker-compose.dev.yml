@@ -21,7 +21,10 @@ services:
       - "8000:8000"
     volumes:
       - ./data:/app/data
-      - ./.cache:/app/.cache
+      # Playwright Chromium and HuggingFace models are baked into the
+      # image at /app/.cache/ms-playwright and /app/.cache/huggingface
+      # — no host bind mount is needed. Only the SQLite database is
+      # persisted here.
     depends_on:
       - qdrant
     shm_size: '2gb'

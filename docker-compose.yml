@@ -16,13 +16,10 @@ services:
       - "8000:8000"
     volumes:
       - ./data:/app/data
-      # ./.cache holds BOTH the HuggingFace model cache (HF_HOME) AND the
-      # Playwright Chromium binary (PLAYWRIGHT_BROWSERS_PATH), so
-      # restarts/upgrades don't redownload either. The browser is also
-      # baked into the image via the multi-stage Dockerfile, so the
-      # first run works even if ./cache is empty. Keep this directory
-      # in your .gitignore (already done).
-      - ./.cache:/app/.cache
+      # Playwright Chromium and HuggingFace models are baked into the
+      # image at /app/.cache/ms-playwright and /app/.cache/huggingface
+      # — no host bind mount is needed. Only the SQLite database is
+      # persisted here.
     depends_on:
       - qdrant
     shm_size: '2gb'

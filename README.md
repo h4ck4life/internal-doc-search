@@ -299,12 +299,10 @@ internal-doc-search/
 ├── chunker.py          # Token-aware text chunking (tiktoken, paragraph-preserving, section heading metadata)
 ├── requirements.txt    # Python dependencies (includes tiktoken)
 ├── docker-compose.yml  # Qdrant + API services (shm_size: 2gb)
-├── Dockerfile          # Multi-stage: browsers + app + Playwright cache volume
-├── entrypoint.sh       # Container entrypoint
+├── Dockerfile          # Multi-stage: browsers + models + runtime (everything baked in)
 ├── pytest.ini          # Test configuration
 ├── .mcp.json           # Claude Code auto-connect MCP config
 ├── data/               # SQLite database (persisted volume)
-├── .cache/             # HF models cache (persisted volume)
 ├── static/             # Web UI (Tailwind CSS, index.html)
 └── tests/              # 120+ tests across 7 files
 ```

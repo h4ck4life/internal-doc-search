@@ -71,37 +71,29 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libcairo2 libasound2 libatspi2.0-0 fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy the Playwright browsers from the previous stage into the runtime
-# image, but at a side path (.image) so the volume mount at
-# /app/.cache/ms-playwright doesn't shadow it. The entrypoint script
-# copies this .image copy into the volume location on first start.
-COPY --from=browsers /app/.cache/ms-playwright /app/.cache/ms-playwright.image
+# Copy the Playwright browsers from the previous stage directly into the
+# runtime image at the path PLAYWRIGHT_BROWSERS_PATH points to. The image
+# is the source of truth — no host bind mount shadows this.
+COPY --from=browsers /app/.cache/ms-playwright /app/.cache/ms-playwright
 
 # Same pattern for HuggingFace models — baked at build time so users
 # don't wait 2-3 minutes for 400MB+ downloads on first start.
-COPY --from=models /app/.cache/huggingface /app/.cache/huggingface.image
+COPY --from=models /app/.cache/huggingface /app/.cache/huggingface
 
 # Copy all top-level Python files and the URLs list. New modules are
 # picked up automatically — no need to edit this list per file.
 COPY *.py ./
 COPY static/ static/
 COPY urls.txt ./
-COPY entrypoint.sh /app/entrypoint.sh
 
-RUN mkdir -p /app/data /app/.cache && \
-    chmod +x /app/entrypoint.sh
+RUN mkdir -p /app/data
 
-# Persist HF model downloads AND the Playwright browser binaries across
-# container restarts via the host's .cache volume (see docker-compose.yml).
-# The volume is mounted at /app/.cache, which already contains both
-# the HuggingFace cache and the Playwright browsers.
+# Playwright Chromium and HuggingFace models are baked directly into this
+# image at the paths below — no host bind mount is needed for /app/.cache.
+# Only the SQLite database is persisted (see docker-compose.yml).
 ENV HF_HOME=/app/.cache/huggingface
 ENV PLAYWRIGHT_BROWSERS_PATH=/app/.cache/ms-playwright
 
 EXPOSE 8000
 
-# entrypoint.sh seeds the Playwright browser from /app/.cache/ms-playwright.image
-# into the volume-mounted /app/.cache/ms-playwright on first start, then
-# execs uvicorn.
-ENTRYPOINT ["/app/entrypoint.sh"]
 CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000"]
