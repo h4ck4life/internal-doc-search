@@ -1,11 +1,12 @@
 <!DOCTYPE html>
-<html lang="en" class="bg-gray-950 text-gray-100">
+<html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Internal Doc Search</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script>
+  // Kept for the dynamic Tailwind utility classes used inside JS innerHTML.
   tailwind.config = {
     theme: {
       extend: {
@@ -19,470 +20,473 @@
   }
 </script>
 <style>
-  /* ─── JS-dependent classes (used via innerHTML / classList / querySelector) ─── */
+  /* ───────────────────────── Design tokens ───────────────────────── */
+  :root {
+    --bg:           #0a0e14;   /* page background */
+    --surface:      #161b22;   /* cards / panels */
+    --surface-2:    #1c2230;   /* hover / elevated */
+    --field:        #0d1117;   /* input background */
+    --border:       #30363d;   /* primary borders */
+    --border-soft:  #242b35;   /* row separators */
+    --text:         #e6edf3;
+    --muted:        #8b949e;
+    --accent:       #58a6ff;
+    --accent-700:   #2f6feb;
+    --green:        #3fb950;
+    --amber:        #d29922;
+    --red:          #f85149;
+    --mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { background: var(--bg); color: var(--text); }
+  body { font-family: var(--sans); -webkit-font-smoothing: antialiased; min-height: 100vh; }
+  input, select, button, textarea { font-family: inherit; }
+  a { color: inherit; }
+
+  /* Scrollbars */
+  * { scrollbar-width: thin; scrollbar-color: #30363d transparent; }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-thumb { background: #30363d; border-radius: 6px; border: 2px solid transparent; background-clip: content-box; }
+  ::-webkit-scrollbar-thumb:hover { background: #3f4753; background-clip: content-box; }
+
+  /* ───────────────────────── Layout primitives ───────────────────────── */
+  .app-header {
+    display: flex; justify-content: space-between; align-items: center;
+    gap: 1rem; flex-wrap: wrap;
+    padding-bottom: 1.1rem; margin-bottom: 1.4rem;
+    border-bottom: 1px solid var(--border-soft);
+  }
+  .app-title { font-size: 1.4rem; font-weight: 700; letter-spacing: -0.02em; display: flex; align-items: center; gap: 0.55rem; }
+  .app-sub { font-size: 0.8rem; color: var(--muted); margin-top: 0.2rem; }
+  .toolbar { display: flex; gap: 0.5rem; flex-wrap: wrap; flex-shrink: 0; }
+
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; }
+  .card-pad { padding: 1.2rem 1.25rem; }
+  .section-title { font-size: 0.95rem; font-weight: 600; display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.9rem; }
+
+  /* ───────────────────────── Buttons ───────────────────────── */
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 0.4rem;
+    padding: 0.55rem 0.95rem; font-size: 0.82rem; font-weight: 500; line-height: 1;
+    border-radius: 9px; border: 1px solid transparent; cursor: pointer;
+    transition: background-color 0.15s, border-color 0.15s, color 0.15s, opacity 0.15s;
+    white-space: nowrap; text-decoration: none;
+  }
+  .btn:disabled { opacity: 0.55; cursor: not-allowed; }
+  .btn-primary { background: var(--accent-700); color: #fff; }
+  .btn-primary:hover:not(:disabled) { background: #3b82f6; }
+  .btn-ghost { background: transparent; border-color: var(--border); color: var(--text); }
+  .btn-ghost:hover:not(:disabled) { background: var(--surface-2); border-color: #3d4753; }
+  .btn-green { background: transparent; border-color: rgba(63,185,80,0.4); color: var(--green); }
+  .btn-green:hover:not(:disabled) { background: rgba(63,185,80,0.12); }
+  .btn-sm { padding: 0.45rem 0.7rem; font-size: 0.8rem; }
+
+  /* ───────────────────────── Fields ───────────────────────── */
+  .field {
+    background: var(--field); color: var(--text);
+    border: 1px solid var(--border); border-radius: 9px;
+    padding: 0.55rem 0.7rem; font-size: 0.85rem;
+    outline: none; transition: border-color 0.15s, box-shadow 0.15s;
+  }
+  .field::placeholder { color: #6b7480; }
+  .field:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(88,166,255,0.18); }
+  .field-num { text-align: center; }
+  input[type="checkbox"] { accent-color: var(--accent); width: 0.95rem; height: 0.95rem; }
+  .help { font-size: 0.72rem; color: var(--muted); }
+
+  /* ───────────────────────── Stat cards ───────────────────────── */
+  .stat { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 0.95rem 1rem; }
+  .stat-val { font-size: 1.7rem; font-weight: 700; line-height: 1.05; letter-spacing: -0.02em; }
+  .stat-val.sm { font-size: 0.92rem; font-weight: 600; line-height: 1.3; }
+  .stat-label { font-size: 0.64rem; text-transform: uppercase; letter-spacing: 0.09em; color: var(--muted); margin-top: 0.4rem; }
+
+  /* ───────────────────────── Collapsible sections ───────────────────────── */
+  details.card > summary { list-style: none; cursor: pointer; user-select: none;
+    display: flex; align-items: center; gap: 0.55rem;
+    padding: 0.9rem 1.15rem; font-size: 0.9rem; font-weight: 600; }
+  details.card > summary::-webkit-details-marker { display: none; }
+  details.card > summary:hover { background: rgba(255,255,255,0.025); }
+  details.card[open] > summary { border-bottom: 1px solid var(--border); }
+  .chev { color: var(--muted); font-size: 0.7rem; transition: transform 0.15s ease; flex-shrink: 0; }
+  details[open] > summary .chev { transform: rotate(90deg); }
+  .details-body { padding: 1.15rem; }
+
+  /* ───────────────────────── URLs table ───────────────────────── */
+  .table-scroll { max-height: 480px; overflow-y: auto; border: 1px solid var(--border); border-radius: 10px; }
+  .url-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+  .url-table thead th {
+    position: sticky; top: 0; z-index: 2; background: var(--surface);
+    text-align: left; font-size: 0.66rem; letter-spacing: 0.06em; text-transform: uppercase;
+    color: var(--muted); font-weight: 600; white-space: nowrap;
+    padding: 0.6rem 0.7rem; border-bottom: 1px solid var(--border); cursor: pointer; user-select: none;
+  }
+  .url-table thead th[data-key]:hover { color: var(--text); }
+  .url-table thead th.sorted { color: var(--accent); }
+  .url-table thead th:last-child { cursor: default; }
+  .url-table tbody td { padding: 0.5rem 0.7rem; border-bottom: 1px solid var(--border-soft); vertical-align: middle; }
+  .url-table tbody tr:last-child td { border-bottom: none; }
+  .url-table tbody tr:hover { background: var(--surface-2); }
+  .url-table td:nth-child(1) { font-family: var(--mono); font-size: 0.78rem; }
+  .url-table th:nth-child(5), .url-table td:nth-child(5) { text-align: right; font-variant-numeric: tabular-nums; }
+  .url-table th:nth-child(7), .url-table td:nth-child(7) { text-align: right; white-space: nowrap; }
+  .url-table .child-row td { background: rgba(88,166,255,0.035); }
+  .url-table .child-row td:first-child { color: var(--muted); }
+  .sort-ind { font-size: 0.62rem; margin-left: 0.3rem; opacity: 0.4; }
+  .sorted .sort-ind { opacity: 1; color: var(--accent); }
+
+  /* ───────────────────────── API endpoint list ───────────────────────── */
+  .api-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem 0.9rem; padding: 0.6rem 0; border-bottom: 1px solid var(--border-soft); font-size: 0.84rem; }
+  .api-row:last-child { border-bottom: none; }
+  .api-row.mcp { border-top: 1px solid var(--accent); margin-top: 0.4rem; padding-top: 0.8rem; }
+  .method { font-family: var(--mono); font-size: 0.66rem; font-weight: 700; letter-spacing: 0.03em;
+    padding: 0.18rem 0.45rem; border-radius: 6px; min-width: 44px; text-align: center; }
+  .method.get  { background: rgba(63,185,80,0.15);  color: var(--green); }
+  .method.post { background: rgba(210,153,34,0.15);  color: var(--amber); }
+  .method.put  { background: rgba(88,166,255,0.15);  color: var(--accent); }
+  .method.del  { background: rgba(248,81,73,0.15);   color: var(--red); }
+  .method.mcp  { background: rgba(163,113,247,0.18); color: #a371f7; }
+  .api-path { font-family: var(--mono); font-size: 0.8rem; min-width: 200px; }
+  .api-desc { color: var(--muted); font-size: 0.8rem; }
+
+  pre { font-family: var(--mono); font-size: 0.75rem; padding: 0.9rem 1rem; border-radius: 10px;
+    background: var(--field); border: 1px solid var(--border); overflow-x: auto; line-height: 1.5; }
+  code.inline { font-family: var(--mono); font-size: 0.74rem; background: rgba(255,255,255,0.07); padding: 0.1rem 0.4rem; border-radius: 5px; color: #d6dde6; }
+
+  /* ════════════════════════════════════════════════════════════════════ */
+  /*  Classes referenced by JS (innerHTML / classList / querySelector)      */
+  /*  Names and behaviour preserved — visuals refined.                      */
+  /* ════════════════════════════════════════════════════════════════════ */
 
   .hidden { display: none !important; }
 
   /* Spinner */
   .spinner {
     display: inline-block; width: 1rem; height: 1rem;
-    border: 2px solid transparent; border-top-color: #58a6ff;
+    border: 2px solid rgba(255,255,255,0.25); border-top-color: #fff;
     border-radius: 50%; animation: spin 0.6s linear infinite;
-    vertical-align: middle; margin-right: 0.3rem;
+    vertical-align: middle;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
 
-  /* Label chips (created dynamically in renderChips) */
+  /* Label chips */
+  .chip-field {
+    display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; min-height: 2.4rem;
+    background: var(--field); border: 1px solid var(--border); border-radius: 9px; padding: 0.35rem 0.6rem;
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+  .chip-field:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(88,166,255,0.18); }
+  .chip-input { flex: 1; min-width: 160px; background: transparent; border: none; outline: none;
+    color: var(--text); font-size: 0.85rem; padding: 0.25rem 0; }
+  .chip-input::placeholder { color: #6b7480; }
   .chip {
     display: inline-flex; align-items: center; gap: 0.3rem;
-    padding: 0.15rem 0.55rem; border-radius: 9999px; font-size: 0.8rem;
-    font-weight: 500; background: #1e3a5f; color: #6c8cff;
-    border: 1px solid #2a4d7a; cursor: default;
+    padding: 0.15rem 0.55rem; border-radius: 9999px; font-size: 0.78rem;
+    font-weight: 500; background: rgba(88,166,255,0.14); color: #79b8ff;
+    border: 1px solid rgba(88,166,255,0.35); cursor: default;
   }
-  .chip.neg { background: #450a0a; color: #f87171; border-color: #7a2a2a; }
+  .chip.neg { background: rgba(248,81,73,0.14); color: #ff7b72; border-color: rgba(248,81,73,0.4); }
   .chip-x { cursor: pointer; opacity: 0.6; font-size: 0.9rem; line-height: 1; padding: 0 0.1rem; }
   .chip-x:hover { opacity: 1; }
   .chip-suggest {
-    position: absolute; background: #161b22; border: 1px solid #30363d;
-    border-radius: 8px; max-height: 180px; overflow-y: auto; z-index: 50;
-    min-width: 200px; box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+    position: absolute; background: var(--surface); border: 1px solid var(--border);
+    border-radius: 9px; max-height: 200px; overflow-y: auto; z-index: 50;
+    min-width: 200px; box-shadow: 0 8px 24px rgba(0,0,0,0.45); padding: 0.25rem;
   }
-  .chip-suggest-item { padding: 0.35rem 0.6rem; cursor: pointer; font-size: 0.85rem; }
-  .chip-suggest-item:hover, .chip-suggest-item.focused { background: rgba(255,255,255,0.06); }
-  .chip-suggest-empty { padding: 0.35rem 0.6rem; opacity: 0.5; font-size: 0.8rem; }
+  .chip-suggest-item { padding: 0.4rem 0.6rem; cursor: pointer; font-size: 0.85rem; border-radius: 6px; }
+  .chip-suggest-item:hover, .chip-suggest-item.focused { background: rgba(88,166,255,0.14); }
+  .chip-suggest-empty { padding: 0.4rem 0.6rem; opacity: 0.5; font-size: 0.8rem; }
 
-  /* Status badges (created dynamically in loadUrls) */
+  /* Status badges */
   .badge {
-    display: inline-block; padding: 0.1rem 0.5rem; border-radius: 9999px;
-    font-size: 0.7rem; font-weight: 600; text-align: center; min-width: 60px;
+    display: inline-block; padding: 0.15rem 0.6rem; border-radius: 9999px;
+    font-size: 0.68rem; font-weight: 600; text-align: center; min-width: 70px;
+    text-transform: capitalize; letter-spacing: 0.02em;
   }
-  .badge-completed { background: #14532d; color: #4ade80; }
-  .badge-pending   { background: #3b2f00; color: #facc15; }
-  .badge-failed    { background: #450a0a; color: #f87171; }
-  .badge-crawling  { background: #1e3a5f; color: #6c8cff; }
+  .badge-completed { background: rgba(63,185,80,0.16);  color: #56d364; }
+  .badge-pending   { background: rgba(210,153,34,0.16); color: #e3b341; }
+  .badge-failed    { background: rgba(248,81,73,0.16);  color: #ff7b72; }
+  .badge-crawling  { background: rgba(88,166,255,0.16); color: #79b8ff; }
 
-  /* Scores (created dynamically in doSearch) */
-  .score-high { color: #4ade80; font-weight: 700; }
-  .score-mid  { color: #facc15; font-weight: 700; }
-  .score-low  { color: #f87171; font-weight: 700; }
+  /* Scores */
+  .score-high { color: #56d364; font-weight: 700; }
+  .score-mid  { color: #e3b341; font-weight: 700; }
+  .score-low  { color: #ff7b72; font-weight: 700; }
 
-  /* Progress card (created dynamically in startPolling) */
+  /* Crawl progress card */
   .crawl-card {
-    background: #161b22; border: 1px solid #30363d; border-radius: 12px;
-    padding: 1rem 1.25rem; margin-bottom: 1rem;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    padding: 1rem 1.2rem;
   }
-  .crawl-card.running { border-color: #2a4d7a; }
-  .crawl-card.done { border-color: #14532d; }
-  .crawl-card.failed { border-color: #7a2a2a; }
+  .crawl-card.running { border-color: rgba(88,166,255,0.45); }
+  .crawl-card.done    { border-color: rgba(63,185,80,0.5); }
+  .crawl-card.failed  { border-color: rgba(248,81,73,0.5); }
   .crawl-card-header { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 0.75rem; }
   .crawl-card-header .icon { font-size: 1.2rem; flex-shrink: 0; }
-  .crawl-card-close { margin-left: auto; background: none; border: none; color: #8b949e; cursor: pointer; font-size: 1rem; padding: 0 0.25rem; line-height: 1; }
-  .crawl-card-close:hover { color: #f87171; }
-  .crawl-card-header .text { font-size: 0.9rem; font-weight: 500; }
-  .crawl-card-stats { display: flex; gap: 1.5rem; flex-wrap: wrap; margin-bottom: 0.75rem; font-size: 0.8rem; }
-  .crawl-card-stat { display: flex; align-items: center; gap: 0.3rem; }
-  .crawl-card-stat .val { font-weight: 600; font-size: 0.95rem; }
-  .progress-bar    { height: 8px; background: #30363d; border-radius: 4px; overflow: hidden; }
-  .progress-fill   { height: 100%; background: linear-gradient(90deg, #238636, #58a6ff); border-radius: 4px; transition: width 0.5s ease; }
-  .progress-label  { display: flex; justify-content: space-between; margin-top: 0.35rem; font-size: 0.75rem; opacity: 0.6; }
+  .crawl-card-header .text { font-size: 0.9rem; font-weight: 600; }
+  .crawl-card-close { margin-left: auto; background: none; border: none; color: var(--muted);
+    cursor: pointer; font-size: 1rem; padding: 0 0.25rem; line-height: 1; }
+  .crawl-card-close:hover { color: var(--red); }
+  .crawl-card-stats { display: flex; gap: 1.5rem; flex-wrap: wrap; margin-bottom: 0.75rem; font-size: 0.8rem; color: var(--muted); }
+  .crawl-card-stat { display: flex; align-items: center; gap: 0.35rem; }
+  .crawl-card-stat .val { font-weight: 700; font-size: 0.95rem; color: var(--text); }
+  .progress-bar  { height: 8px; background: var(--border); border-radius: 4px; overflow: hidden; }
+  .progress-fill { height: 100%; background: linear-gradient(90deg, #238636, #58a6ff); border-radius: 4px; transition: width 0.5s ease; }
+  .progress-label { display: flex; justify-content: space-between; margin-top: 0.4rem; font-size: 0.74rem; color: var(--muted); }
 
-  /* Table helpers (used in loadUrls innerHTML) */
-  .url-col { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
-  .btn-icon { padding: 0.15rem 0.4rem; margin: 0 0.1rem; font-size: 0.75rem; }
+  /* Action buttons inside table rows */
+  .btn-icon { padding: 0.25rem 0.45rem; margin: 0 0.1rem; font-size: 0.8rem; line-height: 1; background: transparent; }
 
-  /* Search results (used in doSearch innerHTML) */
-  .result-content { white-space: pre-wrap; font-size: 0.88rem; line-height: 1.55; }
-  .result-meta    { font-size: 0.8rem; opacity: 0.65; margin-bottom: 0.4rem; }
-  .result-url     { font-size: 0.78rem; margin-top: 0.4rem; word-break: break-all; }
+  /* Search results */
+  .result-card { background: rgba(13,17,23,0.6); border: 1px solid var(--border); border-radius: 11px; padding: 1rem 1.1rem; }
+  .result-card:hover { border-color: #3d4753; }
+  .result-content { white-space: pre-wrap; font-size: 0.88rem; line-height: 1.6; }
+  .result-meta { font-size: 0.78rem; color: var(--muted); }
+  .result-url  { font-size: 0.78rem; margin-top: 0.5rem; word-break: break-all; }
 
-  /* Status messages (toggled via classList) */
-  .status-msg { font-size: 0.85rem; margin-top: 0.4rem; }
-
-  /* Misc */
-  details > summary { cursor: pointer; user-select: none; }
-  details > summary::-webkit-details-marker { display: none; }
-  details > summary::marker { display: none; content: ''; }
-  input, select, button { font-family: inherit; }
+  /* Inline status messages */
+  .status-msg { font-size: 0.85rem; margin-top: 0.6rem; }
+  .status-msg mark { border-radius: 6px; padding: 0.15rem 0.5rem; }
+  #crawlMsg:not(.hidden) { margin-bottom: 1.25rem; }
 </style>
 </head>
-<body class="min-h-screen">
+<body>
 
-<main class="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+<main class="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-7">
 
   <!-- ─── Header ──────────────────────────────────────────────── -->
-  <div class="flex justify-between items-start flex-wrap gap-4 mb-6">
+  <header class="app-header">
     <div>
-      <h1 class="text-2xl font-bold tracking-tight">🔍 Internal Doc Search</h1>
-      <p class="text-sm text-muted mt-0.5">Semantic search for your documentation</p>
+      <div class="app-title">🔍 Internal Doc Search</div>
+      <p class="app-sub">Semantic search for your documentation</p>
     </div>
-    <div class="flex gap-2 flex-shrink-0">
-      <button id="crawlBtnNew" onclick="triggerCrawl('new')"
-              class="px-4 py-2 text-sm font-medium rounded-lg bg-blue-600 hover:bg-blue-500 transition-colors">
-        🆕 Recrawl New
-      </button>
-      <button id="crawlBtnAll" onclick="triggerCrawl('all')"
-              class="px-4 py-2 text-sm font-medium rounded-lg border border-gray-600 text-gray-300 hover:bg-gray-800 transition-colors">
-        🔄 Recrawl All
-      </button>
-      <a href="http://localhost:6333/dashboard" target="_blank"
-         class="px-4 py-2 text-sm font-medium rounded-lg border border-green-700 text-green-400 hover:bg-green-900/30 transition-colors no-underline inline-flex items-center gap-1">
-        📊 Qdrant
-      </a>
+    <div class="toolbar">
+      <button id="crawlBtnNew" onclick="triggerCrawl('new')" class="btn btn-primary">🆕 Recrawl New</button>
+      <button id="crawlBtnAll" onclick="triggerCrawl('all')" class="btn btn-ghost">🔄 Recrawl All</button>
+      <a href="http://localhost:6333/dashboard" target="_blank" class="btn btn-green">📊 Qdrant</a>
     </div>
-  </div>
+  </header>
 
   <div id="crawlMsg" class="status-msg hidden"></div>
 
   <!-- ─── Stats Row ───────────────────────────────────────────── -->
-  <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
-    <div class="bg-surface border border-border rounded-xl p-4 text-center">
-      <div class="text-2xl font-bold" id="statUrls">-</div>
-      <div class="text-xs text-muted uppercase tracking-wider mt-0.5">URLs</div>
+  <section class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
+    <div class="stat">
+      <div class="stat-val" id="statUrls">-</div>
+      <div class="stat-label">URLs</div>
     </div>
-    <div class="bg-surface border border-border rounded-xl p-4 text-center">
-      <div class="text-2xl font-bold" id="statCrawled">-</div>
-      <div class="text-xs text-muted uppercase tracking-wider mt-0.5">Crawled</div>
+    <div class="stat">
+      <div class="stat-val" id="statCrawled">-</div>
+      <div class="stat-label">Crawled</div>
     </div>
-    <div class="bg-surface border border-border rounded-xl p-4 text-center">
-      <div class="text-2xl font-bold" id="statChunks">-</div>
-      <div class="text-xs text-muted uppercase tracking-wider mt-0.5">Chunks</div>
+    <div class="stat">
+      <div class="stat-val" id="statChunks">-</div>
+      <div class="stat-label">Chunks</div>
     </div>
-    <div class="bg-surface border border-border rounded-xl p-4 text-center">
-      <div class="text-sm font-bold" id="statLastCrawl">-</div>
-      <div class="text-xs text-muted uppercase tracking-wider mt-0.5">Last Crawl</div>
+    <div class="stat">
+      <div class="stat-val sm" id="statLastCrawl">-</div>
+      <div class="stat-label">Last Crawl</div>
     </div>
-  </div>
+  </section>
 
   <!-- ─── Search ──────────────────────────────────────────────── -->
-  <div class="bg-surface border border-border rounded-xl p-5 mb-6">
-    <h2 class="text-lg font-semibold mb-3">🔎 Search</h2>
+  <section class="card card-pad mb-6">
+    <div class="section-title">🔎 Search</div>
     <div class="flex gap-2 items-stretch">
       <input type="search" id="searchQuery" placeholder='e.g. "How does OAuth token refresh work?"'
-             onkeydown="if(event.key==='Enter')doSearch()"
-             class="flex-1 px-4 py-2.5 bg-gray-950 border border-border rounded-lg text-sm
-                    placeholder:text-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-600/50 focus:border-blue-500">
-      <button id="searchBtn" onclick="doSearch()"
-              class="px-5 py-2.5 text-sm font-medium rounded-lg bg-blue-600 hover:bg-blue-500 transition-colors flex-shrink-0">
-        Search
-      </button>
+             onkeydown="if(event.key==='Enter')doSearch()" class="field flex-1">
+      <button id="searchBtn" onclick="doSearch()" class="btn btn-primary flex-shrink-0" style="min-width:88px">Search</button>
     </div>
 
     <!-- Label chips -->
     <div id="chipWrap" class="relative mt-3" style="position:relative">
-      <div class="flex flex-wrap gap-1.5 items-center min-h-[2rem] bg-gray-950 border border-border rounded-lg px-3 py-1.5"
-           id="labelChips">
-        <input type="text" id="chipInput" class="flex-1 min-w-[140px] bg-transparent border-none outline-none
-               text-sm text-gray-100 placeholder:text-gray-500 py-0.5"
-               placeholder="Filter by label (type label, prefix with - to exclude, Enter to add)…" autocomplete="off">
+      <div class="chip-field" id="labelChips">
+        <input type="text" id="chipInput" class="chip-input" autocomplete="off"
+               placeholder="Filter by label (type label, prefix with - to exclude, Enter to add)…">
       </div>
       <div id="chipSuggest" class="chip-suggest hidden"></div>
     </div>
 
     <!-- Label mode hint -->
-    <div class="text-xs text-muted mt-2">
-      <span id="labelModeHint">Mode: hard filter (off-label docs excluded)</span>
-    </div>
+    <div class="help mt-2"><span id="labelModeHint">Mode: hard filter (off-label docs excluded)</span></div>
 
     <!-- Results -->
     <div id="searchResults" class="mt-4 space-y-3"></div>
-  </div>
+  </section>
 
-  <!-- ─── Two-Column: URLs + Config ───────────────────────────── -->
-  <div class="grid grid-cols-1 gap-5 mb-6">
+  <!-- ─── URLs ────────────────────────────────────────────────── -->
+  <details open class="card overflow-hidden mb-5">
+    <summary><span class="chev">▸</span>🔗 URLs</summary>
+    <div class="details-body">
+      <!-- Add URL form -->
+      <div class="flex flex-wrap gap-2 items-end">
+        <input type="url" id="newUrl" placeholder="https://docs.example.com" class="field flex-[2] min-w-[180px]">
+        <input type="text" id="newLabel" placeholder="Labels (comma-separated, e.g. Auth, API)" class="field flex-1 min-w-[140px]">
+        <button onclick="addUrl()" class="btn btn-primary flex-shrink-0">+ Add</button>
+      </div>
 
-    <!-- URLs -->
-    <details open class="bg-surface border border-border rounded-xl overflow-hidden">
-      <summary class="px-5 py-3 font-semibold text-sm hover:bg-white/5 transition-colors select-none">
-        🔗 URLs
-      </summary>
-      <div class="px-5 pb-5 border-t border-border">
-        <!-- Add URL form -->
-        <div class="flex flex-wrap gap-2 items-end mt-4">
-          <input type="url" id="newUrl" placeholder="https://docs.example.com"
-                 class="flex-[2] min-w-[160px] px-3 py-2 bg-gray-950 border border-border rounded-lg text-sm
-                        placeholder:text-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-600/50 focus:border-blue-500">
-          <input type="text" id="newLabel" placeholder="Labels (comma-separated, e.g. Auth, API)"
-                 class="flex-1 min-w-[100px] px-3 py-2 bg-gray-950 border border-border rounded-lg text-sm
-                        placeholder:text-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-600/50 focus:border-blue-500">
-          <button onclick="addUrl()"
-                  class="px-4 py-2 text-sm font-medium rounded-lg bg-blue-600 hover:bg-blue-500 transition-colors flex-shrink-0">
-            + Add
-          </button>
-        </div>
-
-        <!-- Deep crawl options -->
-        <div class="flex flex-wrap gap-3 items-center mt-3 text-sm">
-          <label class="flex items-center gap-1.5 cursor-pointer">
-            <input type="checkbox" id="newDeepCrawl" onchange="toggleNewDeepOptions()" class="rounded">
-            Deep crawl
-          </label>
-          <span class="text-muted">max depth</span>
-          <input type="number" id="newDeepDepth" value="3" min="1" max="10"
-                 class="w-16 px-2 py-1.5 bg-gray-950 border border-border rounded-lg text-sm text-center
-                        focus:outline-none focus:ring-2 focus:ring-blue-600/50">
-        </div>
-        <div id="newDeepOptions" class="hidden mt-2">
-          <div class="flex flex-wrap gap-2 items-center">
-            <span class="text-xs text-muted w-12 flex-shrink-0">Include</span>
-            <input type="text" id="newDeepUrlPattern" placeholder="Wildcard, e.g. */docs/*"
-                   class="flex-1 px-3 py-2 bg-gray-950 border border-border rounded-lg text-sm
-                          placeholder:text-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-600/50">
-            <span class="text-xs text-muted w-12 flex-shrink-0">Exclude</span>
-            <input type="text" id="newDeepExcludePattern" placeholder="Regex, e.g. .*/api/.*"
-                   class="flex-1 px-3 py-2 bg-gray-950 border border-border rounded-lg text-sm
-                          placeholder:text-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-600/50">
-          </div>
-        </div>
-
-        <div id="urlMsg" class="status-msg hidden"></div>
-
-        <!-- URLs table -->
-        <div class="overflow-y-auto mt-3" style="max-height: 500px;">
-          <table class="w-full text-sm">
-            <thead>
-              <tr class="border-b border-border text-muted text-xs uppercase tracking-wider">
-                <th class="text-left py-2 pr-2 cursor-pointer hover:text-white select-none" onclick="sortUrls('url')">URL ▾</th>
-                <th class="text-left py-2 pr-2 cursor-pointer hover:text-white select-none" onclick="sortUrls('label')">Label ▾</th>
-                <th class="text-left py-2 pr-2 cursor-pointer hover:text-white select-none" onclick="sortUrls('crawl')">Crawl ▾</th>
-                <th class="text-left py-2 pr-2 cursor-pointer hover:text-white select-none" onclick="sortUrls('status')">Status ▾</th>
-                <th class="text-left py-2 pr-2 cursor-pointer hover:text-white select-none" onclick="sortUrls('chunks')">Chunks ▾</th>
-                <th class="text-left py-2 pr-2 cursor-pointer hover:text-white select-none" onclick="sortUrls('added')">Added ▾</th>
-                <th class="text-left py-2"></th>
-              </tr>
-            </thead>
-            <tbody id="urlTbody">
-              <tr><td colspan="7" class="text-center text-muted py-4">Loading...</td></tr>
-            </tbody>
-          </table>
-        </div>
-
-        <!-- Edit row -->
-        <div id="editRow" class="hidden flex flex-wrap gap-2 items-end mt-4 pt-4 border-t border-border">
-          <input type="url" id="editUrl" placeholder="URL"
-                 class="flex-[2] min-w-[160px] px-3 py-2 bg-gray-950 border border-border rounded-lg text-sm
-                        focus:outline-none focus:ring-2 focus:ring-blue-600/50">
-          <input type="text" id="editLabel" placeholder="Labels (comma-separated)"
-                 class="flex-1 min-w-[100px] px-3 py-2 bg-gray-950 border border-border rounded-lg text-sm
-                        focus:outline-none focus:ring-2 focus:ring-blue-600/50">
-          <button onclick="saveEdit()"
-                  class="px-4 py-2 text-sm font-medium rounded-lg bg-blue-600 hover:bg-blue-500 transition-colors">
-            Save
-          </button>
-          <button onclick="cancelEdit()"
-                  class="px-4 py-2 text-sm font-medium rounded-lg border border-gray-600 text-gray-300 hover:bg-gray-800 transition-colors">
-            Cancel
-          </button>
-        </div>
-        <div id="editDeepRow" class="hidden flex flex-wrap gap-3 items-center mt-2 text-sm">
-          <label class="flex items-center gap-1.5 cursor-pointer">
-            <input type="checkbox" id="editDeepCrawl" onchange="toggleEditDeepOptions()" class="rounded">
-            Deep crawl
-          </label>
-          <span class="text-muted">max depth</span>
-          <input type="number" id="editDeepDepth" value="3" min="1" max="10"
-                 class="w-16 px-2 py-1.5 bg-gray-950 border border-border rounded-lg text-sm text-center
-                        focus:outline-none focus:ring-2 focus:ring-blue-600/50">
-        </div>
-        <div id="editDeepOptions" class="hidden mt-2">
-          <div class="flex flex-wrap gap-2 items-center">
-            <span class="text-xs text-muted w-12 flex-shrink-0">Include</span>
-            <input type="text" id="editDeepUrlPattern" placeholder="Wildcard, e.g. */docs/*"
-                   class="flex-1 px-3 py-2 bg-gray-950 border border-border rounded-lg text-sm
-                          placeholder:text-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-600/50">
-            <span class="text-xs text-muted w-12 flex-shrink-0">Exclude</span>
-            <input type="text" id="editDeepExcludePattern" placeholder="Regex, e.g. .*/api/.*"
-                   class="flex-1 px-3 py-2 bg-gray-950 border border-border rounded-lg text-sm
-                          placeholder:text-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-600/50">
-          </div>
+      <!-- Deep crawl options -->
+      <div class="flex flex-wrap gap-3 items-center mt-3 text-sm">
+        <label class="flex items-center gap-1.5 cursor-pointer">
+          <input type="checkbox" id="newDeepCrawl" onchange="toggleNewDeepOptions()"> Deep crawl
+        </label>
+        <span class="help">max depth</span>
+        <input type="number" id="newDeepDepth" value="3" min="1" max="10" class="field field-num w-16 !py-1.5">
+      </div>
+      <div id="newDeepOptions" class="hidden mt-2">
+        <div class="flex flex-wrap gap-2 items-center">
+          <span class="help w-12 flex-shrink-0">Include</span>
+          <input type="text" id="newDeepUrlPattern" placeholder="Wildcard, e.g. */docs/*" class="field flex-1">
+          <span class="help w-12 flex-shrink-0">Exclude</span>
+          <input type="text" id="newDeepExcludePattern" placeholder="Regex, e.g. .*/api/.*" class="field flex-1">
         </div>
       </div>
-    </details>
 
-    <!-- Config -->
-    <details class="bg-surface border border-border rounded-xl overflow-hidden">
-      <summary class="px-5 py-3 font-semibold text-sm hover:bg-white/5 transition-colors select-none cursor-pointer">
-        ⚙️ Configuration
-      </summary>
-      <form id="configForm" onsubmit="saveConfig(event)" class="px-5 pb-5 border-t border-border">
-        <div class="space-y-3 mt-4">
-          <!-- Chunk size -->
-          <div class="flex flex-wrap items-center gap-3">
-            <label for="cfgChunkMaxChars" class="w-28 flex-shrink-0 text-sm">Chunk size</label>
-            <input type="number" id="cfgChunkMaxChars" min="500" max="5000" step="100"
-                   class="w-24 px-3 py-2 bg-gray-950 border border-border rounded-lg text-sm text-center
-                          focus:outline-none focus:ring-2 focus:ring-blue-600/50">
-            <span class="text-xs text-muted">500–5000 chars</span>
-          </div>
-          <!-- Overlap -->
-          <div class="flex flex-wrap items-center gap-3">
-            <label for="cfgChunkOverlap" class="w-28 flex-shrink-0 text-sm">Overlap</label>
-            <input type="number" id="cfgChunkOverlap" min="0" max="500" step="50"
-                   class="w-24 px-3 py-2 bg-gray-950 border border-border rounded-lg text-sm text-center
-                          focus:outline-none focus:ring-2 focus:ring-blue-600/50">
-            <span class="text-xs text-muted">0–500 chars</span>
-          </div>
-          <!-- Search limit -->
-          <div class="flex flex-wrap items-center gap-3">
-            <label for="cfgSearchLimit" class="w-28 flex-shrink-0 text-sm">Search limit</label>
-            <input type="number" id="cfgSearchLimit" min="1" max="20"
-                   class="w-24 px-3 py-2 bg-gray-950 border border-border rounded-lg text-sm text-center
-                          focus:outline-none focus:ring-2 focus:ring-blue-600/50">
-            <span class="text-xs text-muted">1–20 results</span>
-          </div>
-          <!-- Rerank pool -->
-          <div class="flex flex-wrap items-center gap-3">
-            <label for="cfgRerankCandidates" class="w-28 flex-shrink-0 text-sm">Rerank pool</label>
-            <input type="number" id="cfgRerankCandidates" min="10" max="200" step="10"
-                   class="w-24 px-3 py-2 bg-gray-950 border border-border rounded-lg text-sm text-center
-                          focus:outline-none focus:ring-2 focus:ring-blue-600/50">
-            <span class="text-xs text-muted">10–200 candidates</span>
-          </div>
-          <!-- Label match mode -->
-          <div class="flex flex-wrap items-center gap-3">
-            <label for="cfgLabelMatchMode" class="w-28 flex-shrink-0 text-sm">Label match</label>
-            <select id="cfgLabelMatchMode"
-                    class="w-24 px-3 py-2 bg-gray-950 border border-border rounded-lg text-sm
-                           focus:outline-none focus:ring-2 focus:ring-blue-600/50">
-              <option value="hard">hard</option>
-              <option value="boost">boost</option>
-            </select>
-            <span class="text-xs text-muted">hard=filter · boost=score-blend</span>
-          </div>
-          <!-- Boost weight -->
-          <div class="flex flex-wrap items-center gap-3">
-            <label for="cfgLabelBoostWeight" class="w-28 flex-shrink-0 text-sm">Boost weight</label>
-            <input type="number" id="cfgLabelBoostWeight" min="0" max="1" step="0.05"
-                   class="w-24 px-3 py-2 bg-gray-950 border border-border rounded-lg text-sm text-center
-                          focus:outline-none focus:ring-2 focus:ring-blue-600/50">
-            <span class="text-xs text-muted">0–1 (label blend)</span>
-          </div>
-          <!-- Min CE threshold -->
-          <div class="flex flex-wrap items-center gap-3">
-            <label for="cfgMinCeThreshold" class="w-28 flex-shrink-0 text-sm">Min CE score</label>
-            <input type="number" id="cfgMinCeThreshold" min="0" max="1" step="0.05"
-                   class="w-24 px-3 py-2 bg-gray-950 border border-border rounded-lg text-sm text-center
-                          focus:outline-none focus:ring-2 focus:ring-blue-600/50">
-            <span class="text-xs text-muted">0–1 (filter low CE)</span>
-          </div>
+      <div id="urlMsg" class="status-msg hidden"></div>
+
+      <!-- URLs table -->
+      <div class="table-scroll mt-3">
+        <table id="urlTable" class="url-table">
+          <colgroup>
+            <col style="width:36%"><col style="width:14%"><col style="width:12%">
+            <col style="width:9%"><col style="width:8%"><col style="width:13%"><col style="width:8%">
+          </colgroup>
+          <thead>
+            <tr>
+              <th data-key="url"    onclick="sortUrls('url')">URL<span class="sort-ind">↕</span></th>
+              <th data-key="label"  onclick="sortUrls('label')">Label<span class="sort-ind">↕</span></th>
+              <th data-key="crawl"  onclick="sortUrls('crawl')">Crawl<span class="sort-ind">↕</span></th>
+              <th data-key="status" onclick="sortUrls('status')">Status<span class="sort-ind">↕</span></th>
+              <th data-key="chunks" onclick="sortUrls('chunks')">Chunks<span class="sort-ind">↕</span></th>
+              <th data-key="added"  onclick="sortUrls('added')">Added<span class="sort-ind">↕</span></th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="urlTbody">
+            <tr><td colspan="7" class="text-center py-4" style="color:var(--muted)">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Edit row -->
+      <div id="editRow" class="hidden flex flex-wrap gap-2 items-end mt-4 pt-4" style="border-top:1px solid var(--border)">
+        <input type="url" id="editUrl" placeholder="URL" class="field flex-[2] min-w-[180px]">
+        <input type="text" id="editLabel" placeholder="Labels (comma-separated)" class="field flex-1 min-w-[140px]">
+        <button onclick="saveEdit()" class="btn btn-primary">Save</button>
+        <button onclick="cancelEdit()" class="btn btn-ghost">Cancel</button>
+      </div>
+      <div id="editDeepRow" class="hidden flex flex-wrap gap-3 items-center mt-2 text-sm">
+        <label class="flex items-center gap-1.5 cursor-pointer">
+          <input type="checkbox" id="editDeepCrawl" onchange="toggleEditDeepOptions()"> Deep crawl
+        </label>
+        <span class="help">max depth</span>
+        <input type="number" id="editDeepDepth" value="3" min="1" max="10" class="field field-num w-16 !py-1.5">
+      </div>
+      <div id="editDeepOptions" class="hidden mt-2">
+        <div class="flex flex-wrap gap-2 items-center">
+          <span class="help w-12 flex-shrink-0">Include</span>
+          <input type="text" id="editDeepUrlPattern" placeholder="Wildcard, e.g. */docs/*" class="field flex-1">
+          <span class="help w-12 flex-shrink-0">Exclude</span>
+          <input type="text" id="editDeepExcludePattern" placeholder="Regex, e.g. .*/api/.*" class="field flex-1">
         </div>
-
-        <p class="text-xs text-muted mt-3">
-          Embedding: multi-qa-mpnet-base-cos-v1 · Cross-encoder: ms-marco-MiniLM-L-6-v2
-        </p>
-
-        <div class="flex gap-2 mt-3">
-          <button type="submit"
-                  class="px-4 py-2 text-sm font-medium rounded-lg bg-blue-600 hover:bg-blue-500 transition-colors">
-            Save
-          </button>
-          <button type="button" onclick="resetConfig()"
-                  class="px-4 py-2 text-sm font-medium rounded-lg border border-gray-600 text-gray-300 hover:bg-gray-800 transition-colors">
-            Defaults
-          </button>
-        </div>
-
-        <div id="configMsg" class="status-msg hidden"></div>
-      </form>
-    </details>
-
-  </div>
-
-  <!-- ─── API Endpoints ───────────────────────────────────────── -->
-  <details class="bg-surface border border-border rounded-xl overflow-hidden mb-6">
-    <summary class="px-5 py-3 font-semibold text-sm hover:bg-white/5 transition-colors select-none">
-      📋 API Endpoints (13)
-    </summary>
-    <div class="px-5 pb-5 border-t border-border divide-y divide-border">
-      <div class="flex flex-wrap gap-x-4 gap-y-1 py-2.5 text-sm">
-        <span class="font-bold w-12 flex-shrink-0 text-green-400">GET</span>
-        <span class="font-mono text-sm w-40 flex-shrink-0">/search?q=&limit=&label=</span>
-        <span class="text-muted">Two-stage semantic search; multi-label (OR) with -prefix exclusion</span>
-      </div>
-      <div class="flex flex-wrap gap-x-4 gap-y-1 py-2.5 text-sm">
-        <span class="font-bold w-12 flex-shrink-0 text-green-400">GET</span>
-        <span class="font-mono text-sm w-40 flex-shrink-0">/labels</span>
-        <span class="text-muted">List distinct labels (with URL counts) for chip-based search</span>
-      </div>
-      <div class="flex flex-wrap gap-x-4 gap-y-1 py-2.5 text-sm">
-        <span class="font-bold w-12 flex-shrink-0 text-green-400">GET</span>
-        <span class="font-mono text-sm w-40 flex-shrink-0">/health</span>
-        <span class="text-muted">Service readiness — Qdrant connectivity check</span>
-      </div>
-      <div class="flex flex-wrap gap-x-4 gap-y-1 py-2.5 text-sm">
-        <span class="font-bold w-12 flex-shrink-0 text-yellow-400">POST</span>
-        <span class="font-mono text-sm w-40 flex-shrink-0">/ingest</span>
-        <span class="text-muted">Start background re-crawl (409 if already running)</span>
-      </div>
-      <div class="flex flex-wrap gap-x-4 gap-y-1 py-2.5 text-sm">
-        <span class="font-bold w-12 flex-shrink-0 text-green-400">GET</span>
-        <span class="font-mono text-sm w-40 flex-shrink-0">/ingest/status</span>
-        <span class="text-muted">Current crawl progress (running/total/chunks)</span>
-      </div>
-      <div class="flex flex-wrap gap-x-4 gap-y-1 py-2.5 text-sm">
-        <span class="font-bold w-12 flex-shrink-0 text-green-400">GET</span>
-        <span class="font-mono text-sm w-40 flex-shrink-0">/docs-summary</span>
-        <span class="text-muted">URL count, chunk count, last crawl timestamp</span>
-      </div>
-      <div class="flex flex-wrap gap-x-4 gap-y-1 py-2.5 text-sm">
-        <span class="font-bold w-12 flex-shrink-0 text-green-400">GET</span>
-        <span class="font-mono text-sm w-40 flex-shrink-0">/urls</span>
-        <span class="text-muted">List all configured crawl URLs with status</span>
-      </div>
-      <div class="flex flex-wrap gap-x-4 gap-y-1 py-2.5 text-sm">
-        <span class="font-bold w-12 flex-shrink-0 text-yellow-400">POST</span>
-        <span class="font-mono text-sm w-40 flex-shrink-0">/urls</span>
-        <span class="text-muted">Add new crawl URL (deep_crawl, deep_crawl_max_depth)</span>
-      </div>
-      <div class="flex flex-wrap gap-x-4 gap-y-1 py-2.5 text-sm">
-        <span class="font-bold w-12 flex-shrink-0 text-blue-400">PUT</span>
-        <span class="font-mono text-sm w-40 flex-shrink-0">/urls/{id}</span>
-        <span class="text-muted">Update URL string, label, or deep crawl settings</span>
-      </div>
-      <div class="flex flex-wrap gap-x-4 gap-y-1 py-2.5 text-sm">
-        <span class="font-bold w-12 flex-shrink-0 text-red-400">DEL</span>
-        <span class="font-mono text-sm w-40 flex-shrink-0">/urls/{id}</span>
-        <span class="text-muted">Remove crawl URL</span>
-      </div>
-      <div class="flex flex-wrap gap-x-4 gap-y-1 py-2.5 text-sm">
-        <span class="font-bold w-12 flex-shrink-0 text-green-400">GET</span>
-        <span class="font-mono text-sm w-40 flex-shrink-0">/config</span>
-        <span class="text-muted">Get all configuration values</span>
-      </div>
-      <div class="flex flex-wrap gap-x-4 gap-y-1 py-2.5 text-sm">
-        <span class="font-bold w-12 flex-shrink-0 text-blue-400">PUT</span>
-        <span class="font-mono text-sm w-40 flex-shrink-0">/config</span>
-        <span class="text-muted">Update configuration (label_match_mode: hard|boost, weight 0–1)</span>
-      </div>
-      <div class="flex flex-wrap gap-x-4 gap-y-1 py-2.5 text-sm border-t-2 !border-blue-500/50 mt-2 pt-3">
-        <span class="font-bold w-12 flex-shrink-0 text-purple-400">MCP</span>
-        <span class="font-mono text-sm w-40 flex-shrink-0">/mcp</span>
-        <span class="text-muted">LLM tools: list_labels, search_docs(labels=[]), add_url_to_crawl, trigger_crawl</span>
       </div>
     </div>
   </details>
 
+  <!-- ─── Config ──────────────────────────────────────────────── -->
+  <details class="card overflow-hidden mb-5">
+    <summary><span class="chev">▸</span>⚙️ Configuration</summary>
+    <form id="configForm" onsubmit="saveConfig(event)" class="details-body">
+      <div class="space-y-3">
+        <div class="flex flex-wrap items-center gap-3">
+          <label for="cfgChunkMaxChars" class="w-28 flex-shrink-0 text-sm">Chunk size</label>
+          <input type="number" id="cfgChunkMaxChars" min="500" max="5000" step="100" class="field field-num w-24">
+          <span class="help">500–5000 chars</span>
+        </div>
+        <div class="flex flex-wrap items-center gap-3">
+          <label for="cfgChunkOverlap" class="w-28 flex-shrink-0 text-sm">Overlap</label>
+          <input type="number" id="cfgChunkOverlap" min="0" max="500" step="50" class="field field-num w-24">
+          <span class="help">0–500 chars</span>
+        </div>
+        <div class="flex flex-wrap items-center gap-3">
+          <label for="cfgSearchLimit" class="w-28 flex-shrink-0 text-sm">Search limit</label>
+          <input type="number" id="cfgSearchLimit" min="1" max="20" class="field field-num w-24">
+          <span class="help">1–20 results</span>
+        </div>
+        <div class="flex flex-wrap items-center gap-3">
+          <label for="cfgRerankCandidates" class="w-28 flex-shrink-0 text-sm">Rerank pool</label>
+          <input type="number" id="cfgRerankCandidates" min="10" max="200" step="10" class="field field-num w-24">
+          <span class="help">10–200 candidates</span>
+        </div>
+        <div class="flex flex-wrap items-center gap-3">
+          <label for="cfgLabelMatchMode" class="w-28 flex-shrink-0 text-sm">Label match</label>
+          <select id="cfgLabelMatchMode" class="field w-24">
+            <option value="hard">hard</option>
+            <option value="boost">boost</option>
+          </select>
+          <span class="help">hard=filter · boost=score-blend</span>
+        </div>
+        <div class="flex flex-wrap items-center gap-3">
+          <label for="cfgLabelBoostWeight" class="w-28 flex-shrink-0 text-sm">Boost weight</label>
+          <input type="number" id="cfgLabelBoostWeight" min="0" max="1" step="0.05" class="field field-num w-24">
+          <span class="help">0–1 (label blend)</span>
+        </div>
+        <div class="flex flex-wrap items-center gap-3">
+          <label for="cfgMinCeThreshold" class="w-28 flex-shrink-0 text-sm">Min CE score</label>
+          <input type="number" id="cfgMinCeThreshold" min="0" max="1" step="0.05" class="field field-num w-24">
+          <span class="help">0–1 (filter low CE)</span>
+        </div>
+      </div>
+
+      <p class="help mt-3">Embedding: multi-qa-mpnet-base-cos-v1 · Cross-encoder: ms-marco-MiniLM-L-6-v2</p>
+
+      <div class="flex gap-2 mt-3">
+        <button type="submit" class="btn btn-primary">Save</button>
+        <button type="button" onclick="resetConfig()" class="btn btn-ghost">Defaults</button>
+      </div>
+
+      <div id="configMsg" class="status-msg hidden"></div>
+    </form>
+  </details>
+
+  <!-- ─── API Endpoints ───────────────────────────────────────── -->
+  <details class="card overflow-hidden mb-5">
+    <summary><span class="chev">▸</span>📋 API Endpoints <span class="help" style="font-weight:400">(13)</span></summary>
+    <div class="details-body" style="padding-top:0.4rem">
+      <div class="api-row"><span class="method get">GET</span><span class="api-path">/search?q=&limit=&label=</span><span class="api-desc">Two-stage semantic search; multi-label (OR) with -prefix exclusion</span></div>
+      <div class="api-row"><span class="method get">GET</span><span class="api-path">/labels</span><span class="api-desc">List distinct labels (with URL counts) for chip-based search</span></div>
+      <div class="api-row"><span class="method get">GET</span><span class="api-path">/health</span><span class="api-desc">Service readiness — Qdrant connectivity check</span></div>
+      <div class="api-row"><span class="method post">POST</span><span class="api-path">/ingest</span><span class="api-desc">Start background re-crawl (409 if already running)</span></div>
+      <div class="api-row"><span class="method get">GET</span><span class="api-path">/ingest/status</span><span class="api-desc">Current crawl progress (running/total/chunks)</span></div>
+      <div class="api-row"><span class="method get">GET</span><span class="api-path">/docs-summary</span><span class="api-desc">URL count, chunk count, last crawl timestamp</span></div>
+      <div class="api-row"><span class="method get">GET</span><span class="api-path">/urls</span><span class="api-desc">List all configured crawl URLs with status</span></div>
+      <div class="api-row"><span class="method post">POST</span><span class="api-path">/urls</span><span class="api-desc">Add new crawl URL (deep_crawl, deep_crawl_max_depth)</span></div>
+      <div class="api-row"><span class="method put">PUT</span><span class="api-path">/urls/{id}</span><span class="api-desc">Update URL string, label, or deep crawl settings</span></div>
+      <div class="api-row"><span class="method del">DEL</span><span class="api-path">/urls/{id}</span><span class="api-desc">Remove crawl URL</span></div>
+      <div class="api-row"><span class="method get">GET</span><span class="api-path">/config</span><span class="api-desc">Get all configuration values</span></div>
+      <div class="api-row"><span class="method put">PUT</span><span class="api-path">/config</span><span class="api-desc">Update configuration (label_match_mode: hard|boost, weight 0–1)</span></div>
+      <div class="api-row mcp"><span class="method mcp">MCP</span><span class="api-path">/mcp</span><span class="api-desc">LLM tools: list_labels, search_docs(labels=[]), add_url_to_crawl, trigger_crawl</span></div>
+    </div>
+  </details>
+
   <!-- ─── MCP Setup Guide ─────────────────────────────────────── -->
-  <details class="bg-surface border border-border rounded-xl overflow-hidden mb-6">
-    <summary class="px-5 py-3 font-semibold text-sm hover:bg-white/5 transition-colors select-none">
-      🤖 MCP Setup — Connect LLM Agents
-    </summary>
-    <div class="px-5 pb-5 border-t border-border">
-      <p class="text-sm text-muted mt-4 mb-4">
+  <details class="card overflow-hidden mb-6">
+    <summary><span class="chev">▸</span>🤖 MCP Setup — Connect LLM Agents</summary>
+    <div class="details-body">
+      <p class="text-sm" style="color:var(--muted)">
         Add this endpoint to your LLM client to enable semantic doc search from any agent.
-        Four tools: <code class="text-gray-300 bg-gray-800 px-1.5 py-0.5 rounded text-xs">list_labels</code>
-        (call first to discover topics),
-        <code class="text-gray-300 bg-gray-800 px-1.5 py-0.5 rounded text-xs">search_docs</code>,
-        <code class="text-gray-300 bg-gray-800 px-1.5 py-0.5 rounded text-xs">add_url_to_crawl</code>,
-        <code class="text-gray-300 bg-gray-800 px-1.5 py-0.5 rounded text-xs">trigger_crawl</code>.
+        Four tools: <code class="inline">list_labels</code> (call first to discover topics),
+        <code class="inline">search_docs</code>, <code class="inline">add_url_to_crawl</code>, <code class="inline">trigger_crawl</code>.
       </p>
 
-      <h3 class="text-base font-semibold mt-4 mb-2">Claude Code</h3>
-      <p class="text-sm text-muted mb-2"><strong>Option A — Add globally (all projects):</strong></p>
-      <pre class="text-xs p-4 rounded-lg bg-gray-950 border border-border overflow-x-auto"><code>claude mcp add --scope user --transport http doc-search http://localhost:8000/mcp/</code></pre>
-      <p class="text-sm text-muted mt-3 mb-2"><strong>Option B — Add to this project only:</strong></p>
-      <pre class="text-xs p-4 rounded-lg bg-gray-950 border border-border overflow-x-auto"><code>claude mcp add --transport http doc-search http://localhost:8000/mcp/</code></pre>
-      <p class="text-sm text-muted mt-3 mb-2"><strong>Option C — Project <code class="text-gray-300 bg-gray-800 px-1.5 py-0.5 rounded text-xs">.mcp.json</code></strong> (auto-connects when Claude Code opens this repo):</p>
-      <pre class="text-xs p-4 rounded-lg bg-gray-950 border border-border overflow-x-auto"><code>{
+      <h3 class="text-base font-semibold mt-5 mb-2">Claude Code</h3>
+      <p class="text-sm mb-2"><strong>Option A — Add globally (all projects):</strong></p>
+      <pre><code>claude mcp add --scope user --transport http doc-search http://localhost:8000/mcp/</code></pre>
+      <p class="text-sm mt-3 mb-2"><strong>Option B — Add to this project only:</strong></p>
+      <pre><code>claude mcp add --transport http doc-search http://localhost:8000/mcp/</code></pre>
+      <p class="text-sm mt-3 mb-2"><strong>Option C — Project <code class="inline">.mcp.json</code></strong> (auto-connects when Claude Code opens this repo):</p>
+      <pre><code>{
   "mcpServers": {
     "doc-search": {
       "type": "http",
@@ -491,25 +495,27 @@
   }
 }</code></pre>
 
-      <h3 class="text-base font-semibold mt-4 mb-2">Claude Desktop</h3>
-      <p class="text-sm text-muted mb-2">Settings → Developer → MCP Servers → Add:</p>
-      <pre class="text-xs p-4 rounded-lg bg-gray-950 border border-border overflow-x-auto"><code>{
+      <h3 class="text-base font-semibold mt-5 mb-2">Claude Desktop</h3>
+      <p class="text-sm mb-2">Settings → Developer → MCP Servers → Add:</p>
+      <pre><code>{
   "doc-search": {
     "type": "http",
     "url": "http://localhost:8000/mcp/"
   }
 }</code></pre>
 
-      <h3 class="text-base font-semibold mt-4 mb-2">Codex / Custom Client</h3>
-      <p class="text-sm text-muted mb-2">Any MCP-compatible client. Endpoint URL:</p>
-      <pre class="text-xs p-4 rounded-lg bg-gray-950 border border-border overflow-x-auto"><code>http://localhost:8000/mcp/</code></pre>
+      <h3 class="text-base font-semibold mt-5 mb-2">Codex / Custom Client</h3>
+      <p class="text-sm mb-2">Any MCP-compatible client. Endpoint URL:</p>
+      <pre><code>http://localhost:8000/mcp/</code></pre>
     </div>
   </details>
 
 </main>
 
 <!-- ═══════════════════════════════════════════════════════════════ -->
-<!--  JavaScript — preserved EXACTLY as-is from original             -->
+<!--  JavaScript — behaviour preserved; only 2 safe bug fixes:        -->
+<!--   1. crawl-card stat IDs renamed (was duplicate id="statChunks") -->
+<!--   2. _paintSortArrows() reflects active sort column + direction  -->
 <!-- ═══════════════════════════════════════════════════════════════ -->
 <script>
 let searchLimit = 7, pollTimer = null, knownLabels = [];
@@ -558,8 +564,8 @@ async function triggerCrawl(mode) {
           <button class="crawl-card-close" onclick="var c=this.closest('.crawl-card');c.remove();clearInterval(pollTimer);pollTimer=null;resetCrawlBtns()" title="Dismiss">✕</button>
         </div>
         <div class="crawl-card-stats">
-          <div class="crawl-card-stat"><span class="val" id="statCompleted">0</span> done</div>
-          <div class="crawl-card-stat"><span class="val" id="statChunks">0</span> chunks</div>
+          <div class="crawl-card-stat"><span class="val" id="crawlStatDone">0</span> done</div>
+          <div class="crawl-card-stat"><span class="val" id="crawlStatChunks">0</span> chunks</div>
         </div>
         <div class="progress-bar"><div class="progress-fill" id="progressFill" style="width:0%"></div></div>
         <div class="progress-label"><span id="progressText">Starting…</span><span id="progressPct">0%</span></div>
@@ -585,8 +591,8 @@ function startPolling() {
       const fill = document.getElementById('progressFill');
       const txt = document.getElementById('progressText');
       const pctEl = document.getElementById('progressPct');
-      const statDone = document.getElementById('statCompleted');
-      const statChunks = document.getElementById('statChunks');
+      const statDone = document.getElementById('crawlStatDone');
+      const statChunks = document.getElementById('crawlStatChunks');
       if (fill) fill.style.width = pct + '%';
       if (txt) txt.textContent = s.message || `${s.current_url}/${s.total_urls}`;
       if (pctEl) pctEl.textContent = pct + '%';
@@ -624,6 +630,21 @@ let _urlsSortKey = null, _urlsSortAsc = true;
 function sortUrls(key) {
   if (_urlsSortKey === key) _urlsSortAsc = !_urlsSortAsc; else { _urlsSortKey = key; _urlsSortAsc = true; }
   loadUrls();
+}
+
+// Reflect the active sort column + direction in the table header.
+function _paintSortArrows() {
+  document.querySelectorAll('#urlTable thead th[data-key]').forEach(th => {
+    const ind = th.querySelector('.sort-ind');
+    if (!ind) return;
+    if (th.dataset.key === _urlsSortKey) {
+      ind.textContent = _urlsSortAsc ? '▲' : '▼';
+      th.classList.add('sorted');
+    } else {
+      ind.textContent = '↕';
+      th.classList.remove('sorted');
+    }
+  });
 }
 
 function _sortUrls(urls) {
@@ -686,7 +707,7 @@ async function loadUrls() {
   try {
     const raw = await (await fetch('/urls')).json();
     const urls = _sortUrls(raw);
-    if (!urls.length) { tb.innerHTML = '<tr><td colspan="7" style="text-align:center;opacity:0.4">No URLs yet. Add one above.</td></tr>'; return; }
+    if (!urls.length) { tb.innerHTML = '<tr><td colspan="7" style="text-align:center;opacity:0.4">No URLs yet. Add one above.</td></tr>'; _paintSortArrows(); return; }
 
     // Separate parents and children
     const parents = urls.filter(u => u.parent_url_id == null);
@@ -706,6 +727,7 @@ async function loadUrls() {
     children.forEach(u => html += _renderUrlRow(u, true));
 
     tb.innerHTML = html;
+    _paintSortArrows();
   } catch(e) { tb.innerHTML = '<tr><td colspan="7" style="text-align:center;color:#f87171">Failed to load</td></tr>'; }
 }
 
