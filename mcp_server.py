@@ -42,10 +42,10 @@ def _ensure_imports():
     if _imports_loaded:
         return
     global SentenceTransformer, CrossEncoder, AsyncQdrantClient, models
-    global init_db, list_urls, add_url, get_config
+    global init_db, list_urls, add_url, get_config, validate_url_input
     from sentence_transformers import SentenceTransformer, CrossEncoder  # noqa: F811
     from qdrant_client import AsyncQdrantClient, models  # noqa: F811
-    from store import init_db, list_urls, add_url, get_config  # noqa: F811
+    from store import init_db, list_urls, add_url, get_config, validate_url_input  # noqa: F811
     _imports_loaded = True
 
 
@@ -143,6 +143,7 @@ async def search_docs(
     client = AsyncQdrantClient(url=QDRANT_URL, check_compatibility=False)  # noqa: F811
 
     try:
+        limit = max(1, min(int(limit), 20))
         rerank_candidates = int(get_config("rerank_candidates", "50"))  # noqa: F811
         min_ce = float(get_config("min_ce_threshold", "0.0"))  # noqa: F811
         diversity_cap = int(get_config("source_diversity_cap", "2"))  # noqa: F811
@@ -375,6 +376,7 @@ async def get_adjacent_chunks(
                 break
 
         # Collect window around target
+        window = max(0, min(int(window), 10))
         min_idx = chunk_index - window
         max_idx = chunk_index + window
         adjacent = []
@@ -401,7 +403,7 @@ async def add_url_to_crawl(
     deep_crawl_url_pattern: str = "",
     deep_crawl_exclude_pattern: str = "",
 ) -> dict:
-    """Add a documentation URL to the crawl queue.
+    """Add a documentation URL to the crawl queue. A label is required (pass `label` or `labels`).
 
     The URL will be crawled on the next ingestion run. Use trigger_crawl()
     to start crawling immediately.
@@ -423,9 +425,17 @@ async def add_url_to_crawl(
     """
     _ensure_imports()
     init_db()  # noqa: F811
+    clean_url, err = validate_url_input(  # noqa: F811
+        url, label=label, labels=labels,
+        deep_crawl=deep_crawl,
+        deep_crawl_max_depth=deep_crawl_max_depth,
+        deep_crawl_exclude_pattern=deep_crawl_exclude_pattern,
+    )
+    if err:
+        return {"error": err}
     try:
         return add_url(  # noqa: F811
-            url,
+            clean_url,
             label=label,
             labels=labels,
             deep_crawl=deep_crawl,

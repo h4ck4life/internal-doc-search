@@ -3,7 +3,9 @@
 import sqlite3
 import os
 from datetime import datetime, timezone
+import re
 from typing import Any, List, Optional
+from urllib.parse import urlparse
 
 DB_DIR = os.environ.get("DATA_DIR", "data")
 DB_PATH = os.path.join(DB_DIR, "config.db")
@@ -144,6 +146,55 @@ def _get_url_labels(conn: sqlite3.Connection, url_id: int) -> List[str]:
 
 
 # ─── URL CRUD ────────────────────────────────────────────────────
+
+
+def validate_url_input(
+    url: str,
+    label: str = "",
+    labels: Optional[List[str]] = None,
+    deep_crawl: bool = False,
+    deep_crawl_max_depth: int = 3,
+    deep_crawl_exclude_pattern: str = "",
+):
+    """Validate an add-URL payload. Pure function (no DB access).
+
+    Shared by POST /urls and the MCP add_url_to_crawl tool so the
+    "a label is required" rule and basic input checks are enforced
+    consistently, not only in the browser.
+
+    Returns (normalized_url, error): on success error is None; on failure
+    normalized_url is None and error is a human-readable message.
+    """
+    u = (url or "").strip()
+    if not u:
+        return None, "URL is required."
+    parsed = urlparse(u)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return None, "URL must be a valid http:// or https:// address."
+
+    # Label is mandatory. Accept either the legacy single `label` or `labels`.
+    candidates: List[str] = []
+    if labels:
+        candidates.extend(labels)
+    if label:
+        candidates.append(label)
+    if not _normalize_labels(candidates):
+        return None, "At least one label is required."
+
+    if deep_crawl:
+        try:
+            depth = int(deep_crawl_max_depth)
+        except (TypeError, ValueError):
+            return None, "deep_crawl_max_depth must be an integer between 1 and 10."
+        if not 1 <= depth <= 10:
+            return None, "deep_crawl_max_depth must be between 1 and 10."
+        if deep_crawl_exclude_pattern:
+            try:
+                re.compile(deep_crawl_exclude_pattern)
+            except re.error as exc:
+                return None, f"deep_crawl_exclude_pattern is not a valid regex: {exc}"
+
+    return u, None
 
 
 def add_url(url: str, label: str = "", labels: Optional[List[str]] = None,

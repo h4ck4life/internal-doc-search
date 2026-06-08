@@ -23,6 +23,13 @@ from store import (
 COLLECTION_NAME = "internal_docs"
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
 
+# SPA-friendly crawl waits: Angular/React apps render after the initial HTML,
+# so wait for the network to settle and give the framework time to paint before
+# we capture the page. Tunable via env so retuning needs no code change.
+CRAWL_WAIT_UNTIL = os.environ.get("CRAWL_WAIT_UNTIL", "networkidle")
+CRAWL_DELAY_BEFORE_HTML = float(os.environ.get("CRAWL_DELAY_BEFORE_HTML", "2.0"))
+CRAWL_PAGE_TIMEOUT_MS = int(os.environ.get("CRAWL_PAGE_TIMEOUT_MS", "60000"))
+
 _model: Optional[SentenceTransformer] = None
 
 
@@ -141,6 +148,9 @@ async def _crawl_single_url(
         config = CrawlerRunConfig(
             deep_crawl_strategy=BFSDeepCrawlStrategy(**strategy_kwargs),
             cache_mode=CacheMode.BYPASS,
+            wait_until=CRAWL_WAIT_UNTIL,
+            delay_before_return_html=CRAWL_DELAY_BEFORE_HTML,
+            page_timeout=CRAWL_PAGE_TIMEOUT_MS,
         )
         results = await crawler.arun(url=url, config=config)
         excl_pats = []
@@ -161,7 +171,12 @@ async def _crawl_single_url(
                 pages.append((result_url, md))
         return pages
     else:
-        config = CrawlerRunConfig(cache_mode=CacheMode.BYPASS)
+        config = CrawlerRunConfig(
+            cache_mode=CacheMode.BYPASS,
+            wait_until=CRAWL_WAIT_UNTIL,
+            delay_before_return_html=CRAWL_DELAY_BEFORE_HTML,
+            page_timeout=CRAWL_PAGE_TIMEOUT_MS,
+        )
         result = await crawler.arun(url=url, config=config)
         if result.success:
             md = result.markdown

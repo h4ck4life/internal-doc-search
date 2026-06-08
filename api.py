@@ -19,6 +19,7 @@ from store import (
     delete_url,
     get_config,
     set_config,
+    validate_url_input,
 )
 
 from search_utils import (
@@ -361,10 +362,20 @@ async def get_labels():
 
 @app.post("/urls", status_code=201)
 async def create_url(body: URLInput):
-    """Add a new crawl URL. `labels` (list) wins over `label` (legacy single)."""
+    """Add a new crawl URL. A label is required. `labels` (list) wins over `label`."""
+    clean_url, err = validate_url_input(
+        body.url,
+        label=body.label,
+        labels=body.labels,
+        deep_crawl=body.deep_crawl,
+        deep_crawl_max_depth=body.deep_crawl_max_depth,
+        deep_crawl_exclude_pattern=body.deep_crawl_exclude_pattern,
+    )
+    if err:
+        raise HTTPException(status_code=400, detail=err)
     try:
         return add_url(
-            body.url,
+            clean_url,
             label=body.label,
             labels=body.labels or None,
             deep_crawl=body.deep_crawl,
@@ -459,6 +470,18 @@ async def update_config_endpoint(body: dict):
         "label_match_mode", "label_boost_weight", "min_ce_threshold",
         "source_diversity_cap",
     }
+    # Reject non-numeric values for numeric keys with a clear 400 (not a 500).
+    _int_keys = {"chunk_max_chars", "chunk_overlap", "chunk_max_tokens",
+                 "chunk_overlap_tokens", "search_limit", "rerank_candidates",
+                 "source_diversity_cap"}
+    _float_keys = {"label_boost_weight", "min_ce_threshold"}
+    try:
+        for _k in _int_keys & set(body):
+            int(body[_k])
+        for _k in _float_keys & set(body):
+            float(body[_k])
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Numeric config values must be valid numbers")
     if "label_match_mode" in body and body["label_match_mode"] not in ("hard", "boost"):
         raise HTTPException(status_code=400, detail="label_match_mode must be 'hard' or 'boost'")
     if "label_boost_weight" in body:

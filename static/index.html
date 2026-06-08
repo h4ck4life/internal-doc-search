@@ -93,8 +93,11 @@
   .field::placeholder { color: #6b7480; }
   .field:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(88,166,255,0.18); }
   .field-num { text-align: center; }
+  /* Invalid / required-not-filled state (e.g. missing label on add) */
+  .field-error { border-color: var(--red); box-shadow: 0 0 0 3px rgba(248,81,73,0.18); }
   input[type="checkbox"] { accent-color: var(--accent); width: 0.95rem; height: 0.95rem; }
   .help { font-size: 0.72rem; color: var(--muted); }
+  .req-star { color: var(--red); margin-left: 0.15rem; }
 
   /* ───────────────────────── Stat cards ───────────────────────── */
   .stat { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 0.95rem 1rem; }
@@ -168,6 +171,16 @@
 
   pre { font-family: var(--mono); font-size: 0.75rem; padding: 0.9rem 1rem; border-radius: 10px;
     background: var(--field); border: 1px solid var(--border); overflow-x: auto; line-height: 1.5; }
+  .code-wrap { position: relative; }
+  .copy-btn {
+    position: absolute; top: 0.5rem; right: 0.5rem;
+    background: var(--surface-2); color: var(--muted); border: 1px solid var(--border);
+    border-radius: 6px; font-size: 0.66rem; padding: 0.2rem 0.5rem; cursor: pointer;
+    opacity: 0; transition: opacity 0.15s, color 0.15s, border-color 0.15s;
+  }
+  .code-wrap:hover .copy-btn { opacity: 1; }
+  .copy-btn:hover { color: var(--text); border-color: #3d4753; }
+  .copy-btn.copied { color: var(--green); border-color: rgba(63,185,80,0.5); opacity: 1; }
   code.inline { font-family: var(--mono); font-size: 0.74rem; background: rgba(255,255,255,0.07); padding: 0.1rem 0.4rem; border-radius: 5px; color: #d6dde6; }
 
   /* ════════════════════════════════════════════════════════════════════ */
@@ -335,12 +348,13 @@
   <details open class="card overflow-hidden mb-5">
     <summary><span class="chev">▸</span>🔗 URLs</summary>
     <div class="details-body">
-      <!-- Add URL form -->
+      <!-- Add URL form (label is required) -->
       <div class="flex flex-wrap gap-2 items-end">
-        <input type="url" id="newUrl" placeholder="https://docs.example.com" class="field flex-[2] min-w-[180px]">
-        <input type="text" id="newLabel" placeholder="Labels (comma-separated, e.g. Auth, API)" class="field flex-1 min-w-[140px]">
-        <button onclick="addUrl()" class="btn btn-primary flex-shrink-0">+ Add</button>
+        <input type="url" id="newUrl" placeholder="https://docs.example.com" class="field flex-[2] min-w-[180px]" onkeydown="if(event.key==='Enter')addUrl()">
+        <input type="text" id="newLabel" placeholder="Labels (required, comma-separated, e.g. Auth, API)" class="field flex-1 min-w-[140px]" oninput="this.classList.remove('field-error')" onkeydown="if(event.key==='Enter')addUrl()">
+        <button id="addUrlBtn" onclick="addUrl()" class="btn btn-primary flex-shrink-0">+ Add</button>
       </div>
+      <div class="help mt-1">At least one label is required<span class="req-star">*</span> when adding a URL.</div>
 
       <!-- Deep crawl options -->
       <div class="flex flex-wrap gap-3 items-center mt-3 text-sm">
@@ -533,10 +547,11 @@
 <!--   1. crawl-card stat IDs renamed (was duplicate id="statChunks") -->
 <!--   2. _paintSortArrows() reflects active sort column + direction  -->
 <!--   3. Tree view: discovered pages render nested under their seed   -->
+<!--   4. Add URL: label is now required (client-side validation)     -->
 <!-- ═══════════════════════════════════════════════════════════════ -->
 <script>
 let searchLimit = 7, pollTimer = null, knownLabels = [];
-addEventListener('DOMContentLoaded', () => { loadSummary(); loadUrls(); loadConfig(); loadLabels(); initChipInput(); });
+addEventListener('DOMContentLoaded', () => { loadSummary(); loadUrls(); loadConfig(); loadLabels(); initChipInput(); initCopyButtons(); });
 
 async function loadLabels() {
   try {
@@ -767,22 +782,37 @@ function _splitLabels(s) {
   return (s || '').split(',').map(x => x.trim()).filter(Boolean);
 }
 
+let _addingUrl = false;
 async function addUrl() {
   const u = document.getElementById('newUrl').value.trim();
   const lbls = _splitLabels(document.getElementById('newLabel').value);
   const dc = document.getElementById('newDeepCrawl').checked, dd = parseInt(document.getElementById('newDeepDepth').value) || 3;
   const up = document.getElementById('newDeepUrlPattern').value.trim(), ep = document.getElementById('newDeepExcludePattern').value.trim();
   if (!u) return;
+  if (_addingUrl) return;
   const el = document.getElementById('urlMsg');
+  // Label is mandatory when adding a URL (client-side guard).
+  const labelField = document.getElementById('newLabel');
+  if (!lbls.length) {
+    labelField.classList.add('field-error');
+    el.innerHTML = '<mark style="background:#450a0a;color:#f87171">✗ At least one label is required</mark>';
+    el.classList.remove('hidden');
+    setTimeout(() => el.classList.add('hidden'), 3000);
+    labelField.focus();
+    return;
+  }
   try {
+    _addingUrl = true;
+    const addBtn = document.getElementById('addUrlBtn');
+    if (addBtn) { addBtn.disabled = true; addBtn.innerHTML = '<span class="spinner"></span> Adding…'; }
     const body = {url:u, deep_crawl:dc, deep_crawl_max_depth:dd, deep_crawl_url_pattern:up, deep_crawl_exclude_pattern:ep};
     if (lbls.length === 1) body.label = lbls[0];
     else if (lbls.length > 1) body.labels = lbls;
     const r = await fetch('/urls', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
-    if (r.ok) { document.getElementById('newUrl').value=''; document.getElementById('newLabel').value=''; document.getElementById('newDeepCrawl').checked=false; document.getElementById('newDeepDepth').value=3; document.getElementById('newDeepUrlPattern').value=''; document.getElementById('newDeepExcludePattern').value=''; toggleNewDeepOptions(); loadUrls(); el.innerHTML='<mark style="background:#14532d;color:#4ade80">✓ Added</mark>'; }
+    if (r.ok) { document.getElementById('newUrl').value=''; document.getElementById('newLabel').value=''; labelField.classList.remove('field-error'); document.getElementById('newDeepCrawl').checked=false; document.getElementById('newDeepDepth').value=3; document.getElementById('newDeepUrlPattern').value=''; document.getElementById('newDeepExcludePattern').value=''; toggleNewDeepOptions(); loadUrls(); el.innerHTML='<mark style="background:#14532d;color:#4ade80">✓ Added</mark>'; }
     else { const d = await r.json(); el.innerHTML=`<mark style="background:#450a0a;color:#f87171">✗ ${d.detail||'Error'}</mark>`; }
   } catch(e) { el.innerHTML=`<mark style="background:#450a0a;color:#f87171">✗ ${e.message}</mark>`; }
-  finally { el.classList.remove('hidden'); setTimeout(()=>el.classList.add('hidden'),3000); }
+  finally { _addingUrl = false; const b = document.getElementById('addUrlBtn'); if (b) { b.disabled = false; b.innerHTML = '+ Add'; } el.classList.remove('hidden'); setTimeout(()=>el.classList.add('hidden'),3000); }
 }
 
 let editingId = null;
@@ -1012,6 +1042,31 @@ function toggleEditDeepOptions() {
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────
+// Add hover "Copy" buttons to the MCP setup code blocks.
+function initCopyButtons() {
+  document.querySelectorAll('pre').forEach(pre => {
+    if (pre.parentElement && pre.parentElement.classList.contains('code-wrap')) return;
+    const wrap = document.createElement('div');
+    wrap.className = 'code-wrap';
+    pre.parentNode.insertBefore(wrap, pre);
+    wrap.appendChild(pre);
+    const btn = document.createElement('button');
+    btn.className = 'copy-btn';
+    btn.type = 'button';
+    btn.textContent = 'Copy';
+    btn.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(pre.innerText.trim());
+        btn.textContent = 'Copied'; btn.classList.add('copied');
+        setTimeout(() => { btn.textContent = 'Copy'; btn.classList.remove('copied'); }, 1500);
+      } catch (e) {
+        btn.textContent = 'Failed'; setTimeout(() => { btn.textContent = 'Copy'; }, 1500);
+      }
+    });
+    wrap.appendChild(btn);
+  });
+}
+
 function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 function trunc(s,n) { return s.length>n ? s.substring(0,n-3)+'...' : s; }
 </script>
