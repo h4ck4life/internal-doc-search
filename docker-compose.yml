@@ -9,7 +9,7 @@ services:
       - qdrant_data:/qdrant/storage
 
   api:
-    image: ghcr.io/h4ck4life/docsearch-api:latest
+    image: ghcr.io/h4ck4life/internal-doc-search:latest
     container_name: internal-doc-api
     restart: always
     ports:

@@ -5,7 +5,7 @@
 The image is published to GitHub Container Registry (GHCR):
 
 ```
-ghcr.io/h4ck4life/docsearch-api
+ghcr.io/h4ck4life/internal-doc-search
 ```
 
 **Tags**: `v1.0.0`, `latest`
@@ -17,7 +17,7 @@ ghcr.io/h4ck4life/docsearch-api
 docker compose -f docker-compose.published.yml up -d
 ```
 
-Or with the standard compose file (replace `build: .` with `image: ghcr.io/h4ck4life/docsearch-api:latest`).
+Or with the standard compose file (replace `build: .` with `image: ghcr.io/h4ck4life/internal-doc-search:latest`).
 
 ## What's Baked In
 
@@ -49,22 +49,22 @@ git push origin v1.0.1
 
 # 2. Build with GHCR tags
 docker build \
-  -t ghcr.io/h4ck4life/docsearch-api:v1.0.1 \
-  -t ghcr.io/h4ck4life/docsearch-api:latest \
+  -t ghcr.io/h4ck4life/internal-doc-search:v1.0.1 \
+  -t ghcr.io/h4ck4life/internal-doc-search:latest \
   .
 
 # 3. Login to GHCR
 gh auth token | docker login ghcr.io -u h4ck4life --password-stdin
 
 # 4. Push both tags
-docker push ghcr.io/h4ck4life/docsearch-api:v1.0.1
-docker push ghcr.io/h4ck4life/docsearch-api:latest
+docker push ghcr.io/h4ck4life/internal-doc-search:v1.0.1
+docker push ghcr.io/h4ck4life/internal-doc-search:latest
 ```
 
 ### Verify
 
 ```
-https://github.com/h4ck4life/internal-doc-search/pkgs/container/docsearch-api
+https://github.com/h4ck4life/internal-doc-search/pkgs/container/internal-doc-search
 ```
 
 ## Image Size
@@ -93,7 +93,7 @@ services:
       - qdrant_data:/qdrant/storage
 
   api:
-    image: ghcr.io/h4ck4life/docsearch-api:latest
+    image: ghcr.io/h4ck4life/internal-doc-search:latest
     ports:
       - "8000:8000"
     volumes:
