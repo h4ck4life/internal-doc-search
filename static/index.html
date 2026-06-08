@@ -402,7 +402,8 @@
       <!-- Edit row -->
       <div id="editRow" class="hidden flex flex-wrap gap-2 items-end mt-4 pt-4" style="border-top:1px solid var(--border)">
         <input type="url" id="editUrl" placeholder="URL" class="field flex-[2] min-w-[180px]">
-        <input type="text" id="editLabel" placeholder="Labels (comma-separated)" class="field flex-1 min-w-[140px]">
+        <input type="text" id="editLabel" placeholder="Labels (not editable after add)" class="field flex-1 min-w-[140px]" disabled title="Labels cannot be changed after a URL is added — delete and re-add if needed">
+        <span class="help">Labels are immutable after creation</span>
         <button onclick="saveEdit()" class="btn btn-primary">Save</button>
         <button onclick="cancelEdit()" class="btn btn-ghost">Cancel</button>
       </div>
@@ -832,20 +833,28 @@ function cancelEdit() { editingId = null; document.getElementById('editRow').cla
 async function saveEdit() {
   if (!editingId) return;
   const u = document.getElementById('editUrl').value.trim();
-  const lbls = _splitLabels(document.getElementById('editLabel').value);
   const dc = document.getElementById('editDeepCrawl').checked, dd = parseInt(document.getElementById('editDeepDepth').value) || 3;
   const up = document.getElementById('editDeepUrlPattern').value.trim(), ep = document.getElementById('editDeepExcludePattern').value.trim();
   try {
     const body = {url:u||null, deep_crawl:dc, deep_crawl_max_depth:dd, deep_crawl_url_pattern:up||null, deep_crawl_exclude_pattern:ep||null};
-    if (lbls.length === 1) body.label = lbls[0];
-    else if (lbls.length > 1) body.labels = lbls;
-    else body.labels = [];  // clear all
     const r = await fetch(`/urls/${editingId}`, { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
-    if (r.ok) { cancelEdit(); loadUrls(); }
+    if (r.ok) { cancelEdit(); await loadUrls(); }
     else { const d = await r.json(); alert(d.detail||'Error'); }
   } catch(e) { alert(e.message); }
 }
-async function removeUrl(id) { if (!confirm('Delete this URL?')) return; await fetch(`/urls/${id}`, { method:'DELETE' }); loadUrls(); }
+let _deleting = false;
+async function removeUrl(id) {
+  if (_deleting) return;
+  if (!confirm('Delete this URL? Any child pages discovered via deep crawl will also be removed.')) return;
+  _deleting = true;
+  try {
+    const r = await fetch(`/urls/${id}`, { method:'DELETE' });
+    if (!r.ok) { const d = await r.json(); alert(d.detail || 'Delete failed'); }
+    await loadUrls();
+    await loadSummary();
+  } catch(e) { alert(e.message); }
+  finally { _deleting = false; }
+}
 
 // ─── Config ──────────────────────────────────────────────────────
 async function loadConfig() {
