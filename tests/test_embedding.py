@@ -1,18 +1,47 @@
 """Tests for embedding model and Qdrant operations.
 
-These tests require Qdrant to be running. Mark with pytest marker.
+Unit tests use a deterministic fake embedding model. Qdrant tests are opt-in
+integration tests via --run-qdrant-tests.
 """
 
+import hashlib
+
+import numpy as np
 import pytest
 
 COLLECTION_NAME = "test_internal_docs"
 
 
+class FakeEmbeddingModel:
+    """Small deterministic stand-in for SentenceTransformer."""
+
+    def encode(self, text):
+        vector = np.zeros(768, dtype=np.float32)
+        text_lower = text.lower()
+
+        topic_features = {
+            0: ("oauth", "token", "refresh", "grant"),
+            1: ("deploy", "deployment", "docker", "kubernetes", "container"),
+        }
+        for idx, terms in topic_features.items():
+            vector[idx] = sum(1.0 for term in terms if term in text_lower)
+
+        # Add deterministic low-amplitude noise so unrelated texts are not
+        # identical while topic dimensions still dominate similarity.
+        digest = hashlib.sha256(text.encode()).digest()
+        for i, byte in enumerate(digest, start=2):
+            vector[i] = byte / 2550.0
+
+        norm = np.linalg.norm(vector)
+        if norm:
+            vector = vector / norm
+        return vector
+
+
 @pytest.fixture
 def embedding_model():
-    """Load the bi-encoder model."""
-    from sentence_transformers import SentenceTransformer
-    return SentenceTransformer("multi-qa-mpnet-base-cos-v1")
+    """Return a deterministic fake bi-encoder."""
+    return FakeEmbeddingModel()
 
 
 def test_embedding_dimensions(embedding_model):

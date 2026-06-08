@@ -21,8 +21,7 @@ import shared
 from shared import (
     QDRANT_URL,
     COLLECTION_NAME,
-    is_ingest_running,
-    set_ingest_state,
+    try_start_ingest_state,
     set_ingest_thread,
     update_ingest_state,
     _run_ingest_in_thread,
@@ -475,17 +474,11 @@ async def recrawl_url(url_id: int) -> dict:
     except ImportError as e:
         return {"error": f"Failed to import store modules: {e}"}
 
-    if is_ingest_running():
-        return {"status": "already_running", "message": "A crawl is already in progress. Wait for it to finish."}
-
     url_list = [u for u in _urls() if u["id"] == url_id]
     if not url_list:
         return {"error": f"URL with id={url_id} not found. Use the dashboard or store.list_urls() to find valid IDs."}
 
-    _update_status(url_id, "pending")
-
-    set_ingest_state({
-        "running": True,
+    started = try_start_ingest_state({
         "status": "running",
         "total_urls": 1,
         "current_url": 0,
@@ -493,6 +486,10 @@ async def recrawl_url(url_id: int) -> dict:
         "chunks_stored": 0,
         "message": f"Recrawling: {url_list[0]['url']}",
     })
+    if not started:
+        return {"status": "already_running", "message": "A crawl is already in progress. Wait for it to finish."}
+
+    _update_status(url_id, "pending")
 
     t = _th.Thread(target=_run_ingest_in_thread, args=("new", url_id), daemon=True)
     set_ingest_thread(t)
@@ -525,9 +522,6 @@ async def trigger_crawl(mode: str = "all") -> dict:
     if mode not in ("all", "new"):
         return {"error": f"mode must be 'all' or 'new', got {mode!r}"}
 
-    if is_ingest_running():
-        return {"status": "already_running", "message": "A crawl is already in progress"}
-
     from store import list_urls as _urls, update_url_status as _update_status
     url_list = _urls()
 
@@ -537,12 +531,8 @@ async def trigger_crawl(mode: str = "all") -> dict:
             return {"status": "no_urls", "message": "No pending or failed URLs to crawl. Use mode='all' to recrawl completed URLs."}
     else:
         pending = [u for u in url_list if u["status"] != "crawling"]
-        for u in url_list:
-            if u["status"] in ("completed", "failed"):
-                _update_status(u["id"], "pending")
 
-    set_ingest_state({
-        "running": True,
+    started = try_start_ingest_state({
         "status": "running",
         "total_urls": len(pending),
         "current_url": 0,
@@ -550,6 +540,13 @@ async def trigger_crawl(mode: str = "all") -> dict:
         "chunks_stored": 0,
         "message": f"Crawl started ({mode} mode)",
     })
+    if not started:
+        return {"status": "already_running", "message": "A crawl is already in progress"}
+
+    if mode == "all":
+        for u in url_list:
+            if u["status"] in ("completed", "failed"):
+                _update_status(u["id"], "pending")
 
     t = _th.Thread(target=_run_ingest_in_thread, args=(mode,), daemon=True)
     set_ingest_thread(t)

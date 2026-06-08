@@ -18,9 +18,8 @@ from shared import (
     QDRANT_URL,
     COLLECTION_NAME,
     _load_models,
-    is_ingest_running,
     get_ingest_state,
-    set_ingest_state,
+    try_start_ingest_state,
     update_ingest_state,
     get_ingest_thread,
     set_ingest_thread,
@@ -259,9 +258,6 @@ async def ingest(mode: str = Query(default="all", pattern="^(all|new)$")):
     Ingestion runs in its own thread with a dedicated event loop.
     The main API event loop is never blocked — homepage stays responsive.
     """
-    if is_ingest_running():
-        raise HTTPException(status_code=409, detail={"status": "already_running"})
-
     from store import list_urls as _urls, update_url_status as _update_status
     url_list = _urls()
 
@@ -271,12 +267,8 @@ async def ingest(mode: str = Query(default="all", pattern="^(all|new)$")):
             return {"status": "no_urls", "message": "No pending or failed URLs to crawl. Use mode=all to recrawl completed URLs."}
     else:
         pending = [u for u in url_list if u["status"] != "crawling"]
-        for u in url_list:
-            if u["status"] in ("completed", "failed"):
-                _update_status(u["id"], "pending")
 
-    set_ingest_state({
-        "running": True,
+    started = try_start_ingest_state({
         "status": "running",
         "total_urls": len(pending),
         "current_url": 0,
@@ -284,6 +276,13 @@ async def ingest(mode: str = Query(default="all", pattern="^(all|new)$")):
         "chunks_stored": 0,
         "message": f"Crawl started ({mode} mode)",
     })
+    if not started:
+        raise HTTPException(status_code=409, detail={"status": "already_running"})
+
+    if mode == "all":
+        for u in url_list:
+            if u["status"] in ("completed", "failed"):
+                _update_status(u["id"], "pending")
 
     t = threading.Thread(
         target=_run_ingest_in_thread,
@@ -434,19 +433,12 @@ async def recrawl_url_endpoint(url_id: int):
     """Recrawl a single URL. Resets status to pending, clears old vectors,
     and runs the ingest pipeline for just this URL in a background thread.
     """
-    if is_ingest_running():
-        raise HTTPException(status_code=409, detail={"status": "already_running", "message": "A crawl is already in progress. Wait for it to finish."})
-
     from store import update_url_status as _update_status
     url_list = [u for u in list_urls() if u["id"] == url_id]
     if not url_list:
         raise HTTPException(status_code=404, detail="URL not found")
 
-    # Reset the target URL to pending
-    _update_status(url_id, "pending")
-
-    set_ingest_state({
-        "running": True,
+    started = try_start_ingest_state({
         "status": "running",
         "total_urls": 1,
         "current_url": 0,
@@ -454,6 +446,11 @@ async def recrawl_url_endpoint(url_id: int):
         "chunks_stored": 0,
         "message": f"Recrawling: {url_list[0]['url']}",
     })
+    if not started:
+        raise HTTPException(status_code=409, detail={"status": "already_running", "message": "A crawl is already in progress. Wait for it to finish."})
+
+    # Reset the target URL to pending after reserving the ingest slot.
+    _update_status(url_id, "pending")
 
     t = threading.Thread(
         target=_run_ingest_in_thread,

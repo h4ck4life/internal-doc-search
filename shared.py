@@ -80,8 +80,10 @@ def get_ingest_state() -> dict:
     """
     global _ingest_thread
     with _ingest_lock:
-        if _ingest_state.get("running") and (
-            _ingest_thread is None or not _ingest_thread.is_alive()
+        if (
+            _ingest_state.get("running")
+            and _ingest_thread is not None
+            and not _ingest_thread.is_alive()
         ):
             _ingest_state.update({
                 "running": False,
@@ -97,6 +99,22 @@ def set_ingest_state(values: dict) -> None:
     with _ingest_lock:
         _ingest_state.clear()
         _ingest_state.update(values)
+
+
+def try_start_ingest_state(values: dict) -> bool:
+    """Atomically mark ingest as running with the provided initial state.
+
+    Returns False when another ingest is already running. This prevents two
+    concurrent API/MCP requests from both passing a separate check-then-set
+    sequence and starting duplicate background threads.
+    """
+    with _ingest_lock:
+        if _ingest_state.get("running", False):
+            return False
+        _ingest_state.clear()
+        _ingest_state.update(values)
+        _ingest_state["running"] = True
+        return True
 
 
 def update_ingest_state(**kwargs) -> None:
