@@ -448,6 +448,62 @@ async def add_url_to_crawl(
 
 
 @mcp.tool()
+async def recrawl_url(url_id: int) -> dict:
+    """Recrawl a single URL by its database ID.
+
+    Use this after add_url_to_crawl() to immediately crawl the new URL, or
+    to refresh an existing URL's content. Resets the URL to pending, clears
+    old vectors, and crawls it in a background thread.
+
+    Use list_urls() from the /urls API (or get all IDs via store.list_urls())
+    to discover URL IDs. The web dashboard also shows IDs in the URLs table.
+
+    Args:
+        url_id: The numeric database ID of the URL to recrawl.
+
+    Returns:
+        Status indicating recrawl started, or error if a crawl is already
+        running or the URL ID is not found.
+    """
+    import threading as _th
+
+    _ensure_imports()
+    try:
+        from api import _ingest_state, _run_ingest_in_thread
+        from store import list_urls as _urls, update_url_status as _update_status
+    except ImportError as e:
+        return {"error": f"Failed to import API modules: {e}"}
+
+    if _ingest_state.get("running"):
+        return {"status": "already_running", "message": "A crawl is already in progress. Wait for it to finish."}
+
+    url_list = [u for u in _urls() if u["id"] == url_id]
+    if not url_list:
+        return {"error": f"URL with id={url_id} not found. Use the dashboard or store.list_urls() to find valid IDs."}
+
+    _update_status(url_id, "pending")
+
+    _ingest_state.update({
+        "running": True,
+        "status": "running",
+        "total_urls": 1,
+        "current_url": 0,
+        "current_label": url_list[0].get("label", ""),
+        "chunks_stored": 0,
+        "message": f"Recrawling: {url_list[0]['url']}",
+    })
+
+    _th.Thread(target=_run_ingest_in_thread, args=("new", url_id), daemon=True).start()
+
+    return {
+        "status": "started",
+        "url_id": url_id,
+        "url": url_list[0]["url"],
+        "message": f"Recrawling URL id={url_id} in background thread",
+    }
+
+
+@mcp.tool()
 async def trigger_crawl(mode: str = "all") -> dict:
     """Start a background crawl of configured URLs.
 

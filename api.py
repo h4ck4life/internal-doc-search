@@ -113,11 +113,15 @@ class URLUpdate(BaseModel):
     deep_crawl_exclude_pattern: Optional[str] = None
 
 
-def _run_ingest_in_thread(mode: str):
+def _run_ingest_in_thread(mode: str, url_id: Optional[int] = None):
     """Run the full async ingest pipeline in a dedicated background thread.
 
     Creates its own event loop so the main loop is never blocked.
     Crawl I/O + embedding CPU work all happen in this thread.
+
+    Args:
+        mode: "all" or "new" (only used when url_id is None).
+        url_id: If provided, crawl only this specific URL.
     """
     global _ingest_state, _ingest_thread
     try:
@@ -137,6 +141,7 @@ def _run_ingest_in_thread(mode: str):
             result = await run_ingest(
                 on_progress=on_progress,
                 only_pending=(mode == "new"),
+                url_id=url_id,
             )
             _ingest_state["status"] = "completed"
             _ingest_state["message"] = f"{result['urls_crawled']} URLs, {result['chunks_stored']} chunks"
@@ -439,6 +444,44 @@ async def delete_url_endpoint(url_id: int):
         await client.close()
 
     return {"deleted": True, "affected_urls": len(affected_urls)}
+
+
+@app.post("/urls/{url_id}/recrawl")
+async def recrawl_url_endpoint(url_id: int):
+    """Recrawl a single URL. Resets status to pending, clears old vectors,
+    and runs the ingest pipeline for just this URL in a background thread.
+    """
+    global _ingest_state, _ingest_thread
+
+    if _ingest_state["running"]:
+        raise HTTPException(status_code=409, detail={"status": "already_running", "message": "A crawl is already in progress. Wait for it to finish."})
+
+    from store import update_url_status as _update_status
+    url_list = [u for u in list_urls() if u["id"] == url_id]
+    if not url_list:
+        raise HTTPException(status_code=404, detail="URL not found")
+
+    # Reset the target URL to pending
+    _update_status(url_id, "pending")
+
+    _ingest_state = {
+        "running": True,
+        "status": "running",
+        "total_urls": 1,
+        "current_url": 0,
+        "current_label": url_list[0].get("label", ""),
+        "chunks_stored": 0,
+        "message": f"Recrawling: {url_list[0]['url']}",
+    }
+
+    _ingest_thread = threading.Thread(
+        target=_run_ingest_in_thread,
+        args=("new", url_id),
+        daemon=True,
+    )
+    _ingest_thread.start()
+
+    return {"status": "started", "url_id": url_id, "url": url_list[0]["url"]}
 
 
 @app.get("/config")

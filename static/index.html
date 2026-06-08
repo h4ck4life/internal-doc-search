@@ -399,29 +399,6 @@
         </table>
       </div>
 
-      <!-- Edit row -->
-      <div id="editRow" class="hidden flex flex-wrap gap-2 items-end mt-4 pt-4" style="border-top:1px solid var(--border)">
-        <input type="url" id="editUrl" placeholder="URL" class="field flex-[2] min-w-[180px]">
-        <input type="text" id="editLabel" placeholder="Labels (not editable after add)" class="field flex-1 min-w-[140px]" disabled title="Labels cannot be changed after a URL is added — delete and re-add if needed">
-        <span class="help">Labels are immutable after creation</span>
-        <button onclick="saveEdit()" class="btn btn-primary">Save</button>
-        <button onclick="cancelEdit()" class="btn btn-ghost">Cancel</button>
-      </div>
-      <div id="editDeepRow" class="hidden flex flex-wrap gap-3 items-center mt-2 text-sm">
-        <label class="flex items-center gap-1.5 cursor-pointer">
-          <input type="checkbox" id="editDeepCrawl" onchange="toggleEditDeepOptions()"> Deep crawl
-        </label>
-        <span class="help">max depth</span>
-        <input type="number" id="editDeepDepth" value="3" min="1" max="10" class="field field-num w-16 !py-1.5">
-      </div>
-      <div id="editDeepOptions" class="hidden mt-2">
-        <div class="flex flex-wrap gap-2 items-center">
-          <span class="help w-12 flex-shrink-0">Include</span>
-          <input type="text" id="editDeepUrlPattern" placeholder="Wildcard, e.g. */docs/*" class="field flex-1">
-          <span class="help w-12 flex-shrink-0">Exclude</span>
-          <input type="text" id="editDeepExcludePattern" placeholder="Regex, e.g. .*/api/.*" class="field flex-1">
-        </div>
-      </div>
     </div>
   </details>
 
@@ -483,7 +460,7 @@
 
   <!-- ─── API Endpoints ───────────────────────────────────────── -->
   <details class="card overflow-hidden mb-5">
-    <summary><span class="chev">▸</span>📋 API Endpoints <span class="help" style="font-weight:400">(13)</span></summary>
+    <summary><span class="chev">▸</span>📋 API Endpoints <span class="help" style="font-weight:400">(14)</span></summary>
     <div class="details-body" style="padding-top:0.4rem">
       <div class="api-row"><span class="method get">GET</span><span class="api-path">/search?q=&limit=&label=</span><span class="api-desc">Two-stage semantic search; multi-label (OR) with -prefix exclusion</span></div>
       <div class="api-row"><span class="method get">GET</span><span class="api-path">/labels</span><span class="api-desc">List distinct labels (with URL counts) for chip-based search</span></div>
@@ -495,6 +472,7 @@
       <div class="api-row"><span class="method post">POST</span><span class="api-path">/urls</span><span class="api-desc">Add new crawl URL (deep_crawl, deep_crawl_max_depth)</span></div>
       <div class="api-row"><span class="method put">PUT</span><span class="api-path">/urls/{id}</span><span class="api-desc">Update URL string, label, or deep crawl settings</span></div>
       <div class="api-row"><span class="method del">DEL</span><span class="api-path">/urls/{id}</span><span class="api-desc">Remove crawl URL</span></div>
+      <div class="api-row"><span class="method post">POST</span><span class="api-path">/urls/{id}/recrawl</span><span class="api-desc">Re-crawl a single URL in background</span></div>
       <div class="api-row"><span class="method get">GET</span><span class="api-path">/config</span><span class="api-desc">Get all configuration values</span></div>
       <div class="api-row"><span class="method put">PUT</span><span class="api-path">/config</span><span class="api-desc">Update configuration (label_match_mode: hard|boost, weight 0–1)</span></div>
       <div class="api-row mcp"><span class="method mcp">MCP</span><span class="api-path">/mcp</span><span class="api-desc">LLM tools: list_labels, search_docs(labels=[]), add_url_to_crawl, trigger_crawl</span></div>
@@ -508,7 +486,8 @@
       <p class="text-sm" style="color:var(--muted)">
         Add this endpoint to your LLM client to enable semantic doc search from any agent.
         Four tools: <code class="inline">list_labels</code> (call first to discover topics),
-        <code class="inline">search_docs</code>, <code class="inline">add_url_to_crawl</code>, <code class="inline">trigger_crawl</code>.
+        <code class="inline">search_docs</code>, <code class="inline">add_url_to_crawl</code>, <code class="inline">trigger_crawl</code>,
+        <code class="inline">recrawl_url</code> (single-URL refresh).
       </p>
 
       <h3 class="text-base font-semibold mt-5 mb-2">Claude Code</h3>
@@ -724,8 +703,7 @@ function _renderUrlRow(u, isChild, isLast) {
     <td>${u.chunk_count ?? 0}</td>
     <td style="font-size:0.75rem;white-space:nowrap">${_fmtDate(u.created_at)}</td>
     <td>
-      <!-- Edit hidden for auto-discovered pages — managed by seed's deep crawl config -->
-      <button class="btn-icon border border-gray-600 text-gray-300 hover:bg-gray-700 rounded transition-colors ${isChild ? 'hidden' : ''}" onclick='startEdit(${u.id},"${esc(u.url)}","${esc(labelsText)}",${u.deep_crawl||0},${u.deep_crawl_max_depth||3},"${esc(u.deep_crawl_url_pattern||'')}","${esc(u.deep_crawl_exclude_pattern||'')}")' title="Edit">✏️</button>
+      <button class="btn-icon border border-gray-600 text-blue-400 hover:bg-blue-900/30 rounded transition-colors ${isChild ? 'hidden' : ''}" onclick="recrawlUrl(${u.id})" title="Recrawl this URL">🔄</button>
       <button class="btn-icon border border-gray-600 text-red-400 hover:bg-red-900/30 rounded transition-colors" onclick="removeUrl(${u.id})" title="Delete">🗑</button>
     </td>
   </tr>`;
@@ -816,31 +794,23 @@ async function addUrl() {
   finally { _addingUrl = false; const b = document.getElementById('addUrlBtn'); if (b) { b.disabled = false; b.innerHTML = '+ Add'; } el.classList.remove('hidden'); setTimeout(()=>el.classList.add('hidden'),3000); }
 }
 
-let editingId = null;
-function startEdit(id, url, label, dc, dd, urlPat, exclPat) {
-  editingId = id;
-  document.getElementById('editUrl').value = url;
-  document.getElementById('editLabel').value = label;
-  document.getElementById('editDeepCrawl').checked = !!dc;
-  document.getElementById('editDeepDepth').value = dd || 3;
-  document.getElementById('editDeepUrlPattern').value = urlPat || '';
-  document.getElementById('editDeepExcludePattern').value = exclPat || '';
-  toggleEditDeepOptions();
-  document.getElementById('editRow').classList.remove('hidden');
-  document.getElementById('editDeepRow').classList.remove('hidden');
-}
-function cancelEdit() { editingId = null; document.getElementById('editRow').classList.add('hidden'); document.getElementById('editDeepRow').classList.add('hidden'); }
-async function saveEdit() {
-  if (!editingId) return;
-  const u = document.getElementById('editUrl').value.trim();
-  const dc = document.getElementById('editDeepCrawl').checked, dd = parseInt(document.getElementById('editDeepDepth').value) || 3;
-  const up = document.getElementById('editDeepUrlPattern').value.trim(), ep = document.getElementById('editDeepExcludePattern').value.trim();
+async function recrawlUrl(id) {
+  if (_deleting) return;
+  if (!confirm('Recrawl this URL? This will re-fetch and re-index its content.')) return;
+  _deleting = true;
   try {
-    const body = {url:u||null, deep_crawl:dc, deep_crawl_max_depth:dd, deep_crawl_url_pattern:up||null, deep_crawl_exclude_pattern:ep||null};
-    const r = await fetch(`/urls/${editingId}`, { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
-    if (r.ok) { cancelEdit(); await loadUrls(); }
-    else { const d = await r.json(); alert(d.detail||'Error'); }
+    const r = await fetch(`/urls/${id}/recrawl`, { method:'POST' });
+    if (r.status === 409) { const d = await r.json(); alert(d.detail?.message || d.message || 'A crawl is already running'); }
+    else if (!r.ok) { const d = await r.json(); alert(d.detail || 'Recrawl failed'); }
+    else {
+      // Show a brief confirmation — the crawl progress card will appear automatically
+      const el = document.getElementById('urlMsg');
+      el.innerHTML = '<mark style="background:#14532d;color:#4ade80">✓ Recrawl started</mark>';
+      el.classList.remove('hidden');
+      setTimeout(() => el.classList.add('hidden'), 3000);
+    }
   } catch(e) { alert(e.message); }
+  finally { _deleting = false; }
 }
 let _deleting = false;
 async function removeUrl(id) {
@@ -1045,11 +1015,6 @@ function toggleNewDeepOptions() {
   const show = document.getElementById('newDeepCrawl').checked;
   document.getElementById('newDeepOptions').classList.toggle('hidden', !show);
 }
-function toggleEditDeepOptions() {
-  const show = document.getElementById('editDeepCrawl').checked;
-  document.getElementById('editDeepOptions').classList.toggle('hidden', !show);
-}
-
 // ─── Helpers ─────────────────────────────────────────────────────
 // Add hover "Copy" buttons to the MCP setup code blocks.
 function initCopyButtons() {
