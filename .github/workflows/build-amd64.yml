@@ -22,7 +22,10 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          # Use a classic PAT with write:packages + read:packages, stored
+          # as the GHCR_TOKEN repo secret. The default GITHUB_TOKEN does
+          # not have packages: write in this context, so we need a PAT.
+          password: ${{ secrets.GHCR_TOKEN }}
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
