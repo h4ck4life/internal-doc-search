@@ -31,40 +31,71 @@ First startup is instant — no downloads needed.
 
 ## Publishing a New Version
 
-### Prerequisites
-- GitHub CLI (`gh`) installed and authenticated
-- `write:packages` scope on your token
+The image is multi-arch (`linux/amd64` + `linux/arm64`). The `linux/arm64`
+manifest is built locally and pushed manually; the `linux/amd64` manifest
+is built and merged via GitHub Actions (`.github/workflows/build-amd64.yml`)
+because cross-building amd64 via QEMU on Apple Silicon stalls under
+emulation.
+
+### One-time setup
 
 ```bash
 # Refresh auth with packages scope (one-time)
 gh auth refresh -h github.com -s write:packages
 ```
 
-### Build, Tag & Push
+### 1. Build & push arm64 locally
 
 ```bash
-# 1. Tag the release
-git tag v1.0.1
-git push origin v1.0.1
-
-# 2. Build with GHCR tags
+# Build the multi-stage image on the host (native arm64 on Apple Silicon).
 docker build \
-  -t ghcr.io/h4ck4life/internal-doc-search:v1.0.1 \
+  -t ghcr.io/h4ck4life/internal-doc-search:arm64-tmp \
   -t ghcr.io/h4ck4life/internal-doc-search:latest \
   .
 
-# 3. Login to GHCR
+# Login and push the arm64 image and the rolling :latest tag.
 gh auth token | docker login ghcr.io -u h4ck4life --password-stdin
-
-# 4. Push both tags
-docker push ghcr.io/h4ck4life/internal-doc-search:v1.0.1
+docker push ghcr.io/h4ck4life/internal-doc-search:arm64-tmp
 docker push ghcr.io/h4ck4life/internal-doc-search:latest
+```
+
+### 2. Trigger the amd64 build & multi-arch merge
+
+The workflow runs on a free GitHub-hosted `ubuntu-latest` runner, so the
+amd64 build is native (no QEMU) and reliable. It reads the arm64
+manifest digest from `:latest`, builds amd64, and pushes a multi-arch
+index that updates `:latest` (and `:vX.Y.Z` if triggered by a tag).
+
+```bash
+# Manual run (updates :latest only)
+gh workflow run build-amd64.yml
+
+# Or: cut a release tag, push it, the workflow runs automatically and
+# pushes both :latest and :vX.Y.Z
+git tag v1.0.1
+git push origin v1.0.1
+```
+
+### 3. (Optional) Drop the temporary arm64 tag
+
+```bash
+gh api -X DELETE /user/packages/container/internal-doc-search/versions/$( \
+  gh api /user/packages/container/internal-doc-search/versions \
+    --jq '.[] | select(.metadata.container.tags[]? == "arm64-tmp") | .id' \
+)
 ```
 
 ### Verify
 
+```bash
+# Multi-arch manifest should list both arm64 and amd64.
+docker buildx imagetools inspect ghcr.io/h4ck4life/internal-doc-search:latest
+
+# Anonymous pull should succeed (image is public).
+docker pull ghcr.io/h4ck4life/internal-doc-search:latest
 ```
-https://github.com/h4ck4life/internal-doc-search/pkgs/container/internal-doc-search
+
+GitHub UI: https://github.com/h4ck4life/internal-doc-search/pkgs/container/internal-doc-search
 ```
 
 ## Image Size
