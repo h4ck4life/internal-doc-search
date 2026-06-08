@@ -220,7 +220,7 @@ def test_normalize_results_basic():
 def test_normalize_results_dedups_by_content():
     """Duplicate content (first 100 chars match) is removed."""
     # Build content where first 100 chars are identical
-    prefix = "X" * 110  # ensure hash(content[:100]) matches
+    prefix = "X" * 110  # ensure sha256(content[:100]) matches
     p1 = _make_scored_point(content=prefix + " suffix A")
     p2 = _make_scored_point(content=prefix + " suffix B")
     results = normalize_results([p1, p2], [1.0, -1.0], limit=5,

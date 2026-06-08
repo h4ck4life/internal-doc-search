@@ -433,6 +433,15 @@ def update_url_status(
         conn.close()
 
 
+def checkpoint_wal() -> None:
+    """Truncate the WAL file after bulk writes to prevent unbounded growth."""
+    conn = _get_conn()
+    try:
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    finally:
+        conn.close()
+
+
 # ─── App Config ──────────────────────────────────────────────────
 
 

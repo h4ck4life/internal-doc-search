@@ -49,8 +49,10 @@ def client(monkeypatch, tmp_path):
     monkeypatch.setattr(store_module, "DB_PATH", str(tmp_path / "test_config.db"))
     store_module.init_db()
     # 3. Inject fake models before TestClient handles requests.
-    monkeypatch.setattr(api, "bi_encoder", _FakeBiEncoder())
-    monkeypatch.setattr(api, "cross_encoder", _FakeCrossEncoder())
+    #    Code references shared.bi_encoder directly — single patch suffices.
+    import shared as shared_module
+    monkeypatch.setattr(shared_module, "bi_encoder", _FakeBiEncoder())
+    monkeypatch.setattr(shared_module, "cross_encoder", _FakeCrossEncoder())
 
     with TestClient(api.app) as c:
         yield c
@@ -345,7 +347,7 @@ def test_create_url_with_deep_crawl_and_labels(client):
         "deep_crawl": True,
         "deep_crawl_max_depth": 5,
         "deep_crawl_url_pattern": "*/docs/*",
-        "deep_crawl_exclude_pattern": "*/changelog/*",
+        "deep_crawl_exclude_pattern": ".*/changelog/.*",
     })
     assert response.status_code == 201
     data = response.json()
@@ -353,20 +355,20 @@ def test_create_url_with_deep_crawl_and_labels(client):
     assert data["deep_crawl"] == 1
     assert data["deep_crawl_max_depth"] == 5
     assert data["deep_crawl_url_pattern"] == "*/docs/*"
-    assert data["deep_crawl_exclude_pattern"] == "*/changelog/*"
+    assert data["deep_crawl_exclude_pattern"] == ".*/changelog/.*"
 
 
 def test_create_duplicate_url(client):
     """POST /urls duplicate returns 409."""
-    client.post("/urls", json={"url": "https://example.com"})
-    response = client.post("/urls", json={"url": "https://example.com"})
+    client.post("/urls", json={"url": "https://example.com", "label": "Docs"})
+    response = client.post("/urls", json={"url": "https://example.com", "label": "Docs"})
     assert response.status_code == 409
 
 
 def test_list_urls(client):
     """GET /urls returns all URLs."""
-    client.post("/urls", json={"url": "https://a.com"})
-    client.post("/urls", json={"url": "https://b.com"})
+    client.post("/urls", json={"url": "https://a.com", "label": "A"})
+    client.post("/urls", json={"url": "https://b.com", "label": "B"})
 
     response = client.get("/urls")
     assert response.status_code == 200
@@ -413,8 +415,8 @@ def test_update_nonexistent_url(client):
 
 def test_update_duplicate_url(client):
     """PUT /urls/{id} with existing URL returns 409."""
-    client.post("/urls", json={"url": "https://a.com"})
-    created = client.post("/urls", json={"url": "https://b.com"}).json()
+    client.post("/urls", json={"url": "https://a.com", "label": "A"})
+    created = client.post("/urls", json={"url": "https://b.com", "label": "B"}).json()
 
     response = client.put(f"/urls/{created['id']}", json={"url": "https://a.com"})
     assert response.status_code == 409
@@ -422,7 +424,7 @@ def test_update_duplicate_url(client):
 
 def test_delete_url(client):
     """DELETE /urls/{id} removes URL."""
-    created = client.post("/urls", json={"url": "https://example.com"}).json()
+    created = client.post("/urls", json={"url": "https://example.com", "label": "Docs"}).json()
 
     response = client.delete(f"/urls/{created['id']}")
     assert response.status_code == 200
@@ -456,11 +458,14 @@ def test_ingest_endpoint_returns_started(client):
 
 def test_ingest_already_running_returns_409(client):
     """POST /ingest while a crawl is in progress returns 409."""
-    import api as api_module
-    old_state = dict(api_module._ingest_state)
-    api_module._ingest_state["running"] = True
+    import shared
+    with shared._ingest_lock:
+        old_state = dict(shared._ingest_state)
+        shared._ingest_state["running"] = True
     try:
         response = client.post("/ingest")
         assert response.status_code == 409
     finally:
-        api_module._ingest_state.update(old_state)
+        with shared._ingest_lock:
+            shared._ingest_state.clear()
+            shared._ingest_state.update(old_state)

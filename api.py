@@ -1,15 +1,32 @@
 """FastAPI server exposing /search with two-stage retrieval + UI support endpoints."""
 
-import asyncio
 import os
+import threading
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from qdrant_client import AsyncQdrantClient, models
-from sentence_transformers import CrossEncoder, SentenceTransformer
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+
+import shared
+from shared import (
+    QDRANT_URL,
+    COLLECTION_NAME,
+    _load_models,
+    is_ingest_running,
+    get_ingest_state,
+    set_ingest_state,
+    update_ingest_state,
+    get_ingest_thread,
+    set_ingest_thread,
+    _run_ingest_in_thread,
+    _ingest_stop_event,
+)
 
 from store import (
     init_db,
@@ -28,41 +45,31 @@ from search_utils import (
     apply_source_diversity, generate_low_relevance_hint,
 )
 
-COLLECTION_NAME = "internal_docs"
-QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
-
-# ─── Model loading ───────────────────────────────────────────────
-
-bi_encoder: Optional[SentenceTransformer] = None
-cross_encoder: Optional[CrossEncoder] = None
-
-import threading
-
-# Background ingest state
-_ingest_state = {
-    "running": False,
-    "status": "idle",
-    "total_urls": 0,
-    "current_url": 0,
-    "current_label": "",
-    "chunks_stored": 0,
-    "message": "",
-}
-_ingest_thread = None
-
-
-def _load_models() -> None:
-    global bi_encoder, cross_encoder
-    bi_encoder = SentenceTransformer("multi-qa-mpnet-base-cos-v1")
-    cross_encoder = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
-
 
 @asynccontextmanager
 async def app_lifespan(app: FastAPI):
     """App-level setup: load ML models and init the SQLite config DB."""
+    import logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+    )
     _load_models()
     init_db()
     yield
+    # Graceful shutdown: signal ingest thread to stop, then join
+    _ingest_stop_event.set()
+    t = get_ingest_thread()
+    if t is not None:
+        t.join(timeout=30)
+        if t.is_alive():
+            update_ingest_state(
+                status="cancelled",
+                message="Crawl cancelled during server shutdown",
+                running=False,
+            )
+            set_ingest_thread(None)
 
 
 from mcp_server import mcp as mcp_app
@@ -90,6 +97,12 @@ app = FastAPI(
     lifespan=combined_lifespan,
 )
 
+# ─── Rate limiting ───────────────────────────────────────────────
+
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 # ─── Request/Response models ─────────────────────────────────────
 
 
@@ -113,54 +126,13 @@ class URLUpdate(BaseModel):
     deep_crawl_exclude_pattern: Optional[str] = None
 
 
-def _run_ingest_in_thread(mode: str, url_id: Optional[int] = None):
-    """Run the full async ingest pipeline in a dedicated background thread.
-
-    Creates its own event loop so the main loop is never blocked.
-    Crawl I/O + embedding CPU work all happen in this thread.
-
-    Args:
-        mode: "all" or "new" (only used when url_id is None).
-        url_id: If provided, crawl only this specific URL.
-    """
-    global _ingest_state, _ingest_thread
-    try:
-        from ingest import run_ingest
-        import asyncio
-
-        async def _run():
-            async def on_progress(current, total, label, chunks):
-                _ingest_state.update({
-                    "current_url": current,
-                    "total_urls": total,
-                    "current_label": label,
-                    "chunks_stored": chunks,
-                    "message": f"{current}/{total} — {label}",
-                })
-
-            result = await run_ingest(
-                on_progress=on_progress,
-                only_pending=(mode == "new"),
-                url_id=url_id,
-            )
-            _ingest_state["status"] = "completed"
-            _ingest_state["message"] = f"{result['urls_crawled']} URLs, {result['chunks_stored']} chunks"
-            _ingest_state["current_url"] = _ingest_state["total_urls"]
-
-        asyncio.run(_run())
-    except Exception as e:
-        _ingest_state["status"] = "failed"
-        _ingest_state["message"] = str(e)
-    finally:
-        _ingest_state["running"] = False
-        _ingest_thread = None
-
 
 # ─── Endpoints ───────────────────────────────────────────────────
 
 
 @app.get("/search")
-async def search(q: str = Query(...), limit: int = Query(default=5, ge=1, le=50),
+@limiter.limit("10/second")
+async def search(request: Request, q: str = Query(...), limit: int = Query(default=5, ge=1, le=50),
                  label: list[str] = Query(default=[]),
                  label_match_mode: str = Query(default="")):
     """Two-stage retrieval: bi-encoder recall → cross-encoder rerank.
@@ -196,7 +168,7 @@ async def search(q: str = Query(...), limit: int = Query(default=5, ge=1, le=50)
         diversity_cap = int(get_config("source_diversity_cap", "2"))
 
         # Stage 1: Bi-encoder retrieval
-        query_vector = bi_encoder.encode(q).tolist()
+        query_vector = shared.bi_encoder.encode(q).tolist()
         query_kwargs = dict(
             collection_name=COLLECTION_NAME,
             query=query_vector,
@@ -211,7 +183,7 @@ async def search(q: str = Query(...), limit: int = Query(default=5, ge=1, le=50)
 
         # Stage 2: Cross-encoder rerank
         pairs = [(q, point.payload.get("content", "")) for point in results.points]
-        ce_scores = cross_encoder.predict(pairs)
+        ce_scores = shared.cross_encoder.predict(pairs)
 
         # Stage 3: Normalize, filter, diversify
         if mode == "boost" and positive:
@@ -257,15 +229,27 @@ async def search(q: str = Query(...), limit: int = Query(default=5, ge=1, le=50)
 
 @app.get("/health")
 async def health():
-    """Health check: verify Qdrant connectivity."""
+    """Health check: verify Qdrant connectivity and model readiness."""
     client = AsyncQdrantClient(url=QDRANT_URL, check_compatibility=False)
     try:
         await client.get_collections()
-        return {"status": "healthy", "qdrant": "connected"}
+        qdrant_ok = True
     except Exception:
-        raise HTTPException(status_code=503, detail={"status": "unhealthy", "qdrant": "disconnected"})
+        qdrant_ok = False
     finally:
         await client.close()
+
+    models_ok = shared.bi_encoder is not None and shared.cross_encoder is not None
+
+    status = "healthy" if qdrant_ok and models_ok else "unhealthy"
+    detail = {
+        "status": status,
+        "qdrant": "connected" if qdrant_ok else "disconnected",
+        "models_loaded": models_ok,
+    }
+    if not qdrant_ok or not models_ok:
+        raise HTTPException(status_code=503, detail=detail)
+    return detail
 
 
 @app.post("/ingest")
@@ -275,9 +259,7 @@ async def ingest(mode: str = Query(default="all", pattern="^(all|new)$")):
     Ingestion runs in its own thread with a dedicated event loop.
     The main API event loop is never blocked — homepage stays responsive.
     """
-    global _ingest_state, _ingest_thread
-
-    if _ingest_state["running"]:
+    if is_ingest_running():
         raise HTTPException(status_code=409, detail={"status": "already_running"})
 
     from store import list_urls as _urls, update_url_status as _update_status
@@ -293,7 +275,7 @@ async def ingest(mode: str = Query(default="all", pattern="^(all|new)$")):
             if u["status"] in ("completed", "failed"):
                 _update_status(u["id"], "pending")
 
-    _ingest_state = {
+    set_ingest_state({
         "running": True,
         "status": "running",
         "total_urls": len(pending),
@@ -301,14 +283,15 @@ async def ingest(mode: str = Query(default="all", pattern="^(all|new)$")):
         "current_label": "",
         "chunks_stored": 0,
         "message": f"Crawl started ({mode} mode)",
-    }
+    })
 
-    _ingest_thread = threading.Thread(
+    t = threading.Thread(
         target=_run_ingest_in_thread,
         args=(mode,),
         daemon=True,
     )
-    _ingest_thread.start()
+    set_ingest_thread(t)
+    t.start()
 
     return {"status": "started", "mode": mode, "total_urls": len(pending)}
 
@@ -316,7 +299,7 @@ async def ingest(mode: str = Query(default="all", pattern="^(all|new)$")):
 @app.get("/ingest/status")
 async def ingest_status():
     """Return current crawler state."""
-    return _ingest_state
+    return get_ingest_state()
 
 
 @app.get("/docs-summary")
@@ -451,9 +434,7 @@ async def recrawl_url_endpoint(url_id: int):
     """Recrawl a single URL. Resets status to pending, clears old vectors,
     and runs the ingest pipeline for just this URL in a background thread.
     """
-    global _ingest_state, _ingest_thread
-
-    if _ingest_state["running"]:
+    if is_ingest_running():
         raise HTTPException(status_code=409, detail={"status": "already_running", "message": "A crawl is already in progress. Wait for it to finish."})
 
     from store import update_url_status as _update_status
@@ -464,7 +445,7 @@ async def recrawl_url_endpoint(url_id: int):
     # Reset the target URL to pending
     _update_status(url_id, "pending")
 
-    _ingest_state = {
+    set_ingest_state({
         "running": True,
         "status": "running",
         "total_urls": 1,
@@ -472,14 +453,15 @@ async def recrawl_url_endpoint(url_id: int):
         "current_label": url_list[0].get("label", ""),
         "chunks_stored": 0,
         "message": f"Recrawling: {url_list[0]['url']}",
-    }
+    })
 
-    _ingest_thread = threading.Thread(
+    t = threading.Thread(
         target=_run_ingest_in_thread,
         args=("new", url_id),
         daemon=True,
     )
-    _ingest_thread.start()
+    set_ingest_thread(t)
+    t.start()
 
     return {"status": "started", "url_id": url_id, "url": url_list[0]["url"]}
 
@@ -498,8 +480,8 @@ async def get_config_endpoint():
         "label_boost_weight": float(get_config("label_boost_weight", "0.3")),
         "min_ce_threshold": float(get_config("min_ce_threshold", "0.0")),
         "source_diversity_cap": int(get_config("source_diversity_cap", "2")),
-        "embedding_model": "multi-qa-mpnet-base-cos-v1",
-        "cross_encoder_model": "cross-encoder/ms-marco-MiniLM-L-6-v2",
+        "embedding_model": os.environ.get("MODEL_NAME", "multi-qa-mpnet-base-cos-v1"),
+        "cross_encoder_model": os.environ.get("CROSS_ENCODER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2"),
     }
 
 

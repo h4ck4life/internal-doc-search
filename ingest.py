@@ -1,10 +1,14 @@
 """Ingestion pipeline: crawl docs → extract metadata → chunk → embed → store in Qdrant."""
 
 import asyncio
+import logging
 import os
 import re
+import threading
 import uuid
 from typing import Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
 from crawl4ai.deep_crawling import BFSDeepCrawlStrategy
@@ -20,8 +24,7 @@ from store import (
     get_config,
 )
 
-COLLECTION_NAME = "internal_docs"
-QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
+from shared import QDRANT_URL, COLLECTION_NAME
 
 # SPA-friendly crawl waits: Angular/React apps render after the initial HTML,
 # so wait for the network to settle and give the framework time to paint before
@@ -36,7 +39,8 @@ _model: Optional[SentenceTransformer] = None
 def _get_model() -> SentenceTransformer:
     global _model
     if _model is None:
-        _model = SentenceTransformer("multi-qa-mpnet-base-cos-v1")
+        model_name = os.environ.get("MODEL_NAME", "multi-qa-mpnet-base-cos-v1")
+        _model = SentenceTransformer(model_name)
     return _model
 
 
@@ -49,15 +53,6 @@ async def _ensure_collection(client: AsyncQdrantClient) -> None:
             collection_name=COLLECTION_NAME,
             vectors_config=models.VectorParams(size=768, distance=models.Distance.COSINE),
         )
-
-
-def _wildcard_match(url: str, pattern: str) -> bool:
-    """Simple glob-style wildcard match for URL filtering.
-    Supports * as wildcard. Case-insensitive.
-    """
-    # Convert glob pattern to regex: escape regex chars, then replace \* with .*
-    regex_pat = re.escape(pattern).replace(r"\*", ".*")
-    return re.search(regex_pat, url, re.IGNORECASE) is not None
 
 
 def extract_page_title(markdown: str) -> str:
@@ -161,7 +156,7 @@ async def _crawl_single_url(
         for r in results:
             if r.success:
                 result_url = getattr(r, "url", "") or ""
-                if excl_pats and any(_wildcard_match(result_url, pat) for pat in excl_pats):
+                if excl_pats and any(re.search(pat, result_url, re.IGNORECASE) for pat in excl_pats):
                     continue
                 md = r.markdown
                 if hasattr(md, 'fit_markdown'):
@@ -189,7 +184,8 @@ async def _crawl_single_url(
             raise RuntimeError(result.error_message or "Unknown crawl error")
 
 
-async def run_ingest(on_progress=None, only_pending: bool = False, url_id: Optional[int] = None) -> Dict:
+async def run_ingest(on_progress=None, only_pending: bool = False, url_id: Optional[int] = None,
+                    stop_event: Optional[threading.Event] = None) -> Dict:
     """Run the full ingestion pipeline. Updates per-URL status in SQLite.
 
     Args:
@@ -197,6 +193,7 @@ async def run_ingest(on_progress=None, only_pending: bool = False, url_id: Optio
         only_pending: If True, only crawl URLs with status "pending" or "failed"
             (skip "completed"). Default False = crawl everything.
         url_id: If provided, crawl only this specific URL (overrides other filters).
+        stop_event: Optional threading.Event — if set, stops crawling early.
     """
     init_db()
     urls = list_urls()
@@ -242,6 +239,9 @@ async def run_ingest(on_progress=None, only_pending: bool = False, url_id: Optio
     try:
         async with AsyncWebCrawler(config=browser_config) as crawler:
             for url_entry in urls:
+                if stop_event and stop_event.is_set():
+                    logger.info("Stop event received — cancelling remaining URLs")
+                    break
                 url_id = url_entry["id"]
                 url = url_entry["url"]
                 label = url_entry.get("label", "") or ""
@@ -256,7 +256,7 @@ async def run_ingest(on_progress=None, only_pending: bool = False, url_id: Optio
                     crawl_type += f" include={url_pattern}"
                 if exclude_pattern:
                     crawl_type += f" exclude={exclude_pattern}"
-                print(f"Crawling [{crawl_type}]: {url}")
+                logger.info("Crawling [%s]: %s", crawl_type, url)
 
                 try:
                     pages = await _crawl_single_url(
@@ -266,12 +266,12 @@ async def run_ingest(on_progress=None, only_pending: bool = False, url_id: Optio
                 except Exception as e:
                     update_url_status(url_id, "failed", error_message=str(e))
                     errors.append({"url": url, "error": str(e)})
-                    print(f"  FAILED: {e}")
+                    logger.error("  FAILED: %s", e)
                     continue
 
                 if not pages or all(not md or not md.strip() for _, md in pages):
                     update_url_status(url_id, "completed", chunk_count=0)
-                    print(f"  Empty page(s), skipped")
+                    logger.info("  Empty page(s), skipped")
                     continue
 
                 # Labels inherited from the seed URL
@@ -305,7 +305,7 @@ async def run_ingest(on_progress=None, only_pending: bool = False, url_id: Optio
                         )
                         store_url = registered["url"] if registered else page_url
                         if registered and registered.get("id"):
-                            print(f"    Registered: {page_url}")
+                            logger.info("    Registered: %s", page_url)
 
                     # Delete old vectors for this page URL before re-ingesting
                     await client.delete(
@@ -378,13 +378,16 @@ async def run_ingest(on_progress=None, only_pending: bool = False, url_id: Optio
                 total_urls += 1
                 total_chunks += len(all_points)
                 pages_info = f" ({len(pages)} pages)" if len(pages) > 1 else ""
-                print(f"  Saved {len(all_points)} chunks from {url}{pages_info}")
+                logger.info("  Saved %d chunks from %s%s", len(all_points), url, pages_info)
 
                 if on_progress:
                     await on_progress(total_urls, total_pending, url_entry.get("label", url), total_chunks)
 
     finally:
         await client.close()
+
+    from store import checkpoint_wal
+    checkpoint_wal()
 
     return {
         "status": "completed",
@@ -406,4 +409,4 @@ if __name__ == "__main__":
 
     only_pending = (args.mode == "new")
     result = asyncio.run(run_ingest(only_pending=only_pending))
-    print(f"\nIngest complete: {result}")
+    print(f"\nIngest complete: {result}")  # intentionally print (CLI mode)

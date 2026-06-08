@@ -12,11 +12,21 @@ Tools:
 Run: `fastmcp run mcp_server.py` (standalone) or mounted in FastAPI via `mcp.http_app()`
 """
 
-import asyncio
-import os
+import threading as _th
 from typing import Optional
 
 from fastmcp import FastMCP
+
+import shared
+from shared import (
+    QDRANT_URL,
+    COLLECTION_NAME,
+    is_ingest_running,
+    set_ingest_state,
+    set_ingest_thread,
+    update_ingest_state,
+    _run_ingest_in_thread,
+)
 
 from search_utils import (
     parse_labels,
@@ -30,9 +40,6 @@ from search_utils import (
 
 mcp = FastMCP("Doc Search")
 
-QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
-COLLECTION_NAME = "internal_docs"
-
 # Lazy module loading
 _imports_loaded = False
 
@@ -41,9 +48,8 @@ def _ensure_imports():
     global _imports_loaded
     if _imports_loaded:
         return
-    global SentenceTransformer, CrossEncoder, AsyncQdrantClient, models
+    global AsyncQdrantClient, models
     global init_db, list_urls, add_url, get_config, validate_url_input
-    from sentence_transformers import SentenceTransformer, CrossEncoder  # noqa: F811
     from qdrant_client import AsyncQdrantClient, models  # noqa: F811
     from store import init_db, list_urls, add_url, get_config, validate_url_input  # noqa: F811
     _imports_loaded = True
@@ -138,8 +144,6 @@ async def search_docs(
     """
     _ensure_imports()
 
-    from api import bi_encoder, cross_encoder
-
     client = AsyncQdrantClient(url=QDRANT_URL, check_compatibility=False)  # noqa: F811
 
     try:
@@ -162,7 +166,7 @@ async def search_docs(
             qfilter = build_filter(positive, negative)
 
         # Stage 1: Bi-encoder retrieval
-        query_vector = bi_encoder.encode(query).tolist()
+        query_vector = shared.bi_encoder.encode(query).tolist()
         query_kwargs = dict(
             collection_name=COLLECTION_NAME,
             query=query_vector,
@@ -177,7 +181,7 @@ async def search_docs(
 
         # Stage 2: Cross-encoder rerank
         pairs = [(query, p.payload.get("content", "")) for p in results.points]
-        ce_scores = cross_encoder.predict(pairs)
+        ce_scores = shared.cross_encoder.predict(pairs)
 
         # Stage 3: Normalize, filter, diversify
         if label_match_mode == "boost" and positive:
@@ -465,16 +469,13 @@ async def recrawl_url(url_id: int) -> dict:
         Status indicating recrawl started, or error if a crawl is already
         running or the URL ID is not found.
     """
-    import threading as _th
-
     _ensure_imports()
     try:
-        from api import _ingest_state, _run_ingest_in_thread
         from store import list_urls as _urls, update_url_status as _update_status
     except ImportError as e:
-        return {"error": f"Failed to import API modules: {e}"}
+        return {"error": f"Failed to import store modules: {e}"}
 
-    if _ingest_state.get("running"):
+    if is_ingest_running():
         return {"status": "already_running", "message": "A crawl is already in progress. Wait for it to finish."}
 
     url_list = [u for u in _urls() if u["id"] == url_id]
@@ -483,7 +484,7 @@ async def recrawl_url(url_id: int) -> dict:
 
     _update_status(url_id, "pending")
 
-    _ingest_state.update({
+    set_ingest_state({
         "running": True,
         "status": "running",
         "total_urls": 1,
@@ -493,7 +494,9 @@ async def recrawl_url(url_id: int) -> dict:
         "message": f"Recrawling: {url_list[0]['url']}",
     })
 
-    _th.Thread(target=_run_ingest_in_thread, args=("new", url_id), daemon=True).start()
+    t = _th.Thread(target=_run_ingest_in_thread, args=("new", url_id), daemon=True)
+    set_ingest_thread(t)
+    t.start()
 
     return {
         "status": "started",
@@ -517,15 +520,12 @@ async def trigger_crawl(mode: str = "all") -> dict:
     Returns:
         Status indicating crawl has started, or error if already running
     """
-    import threading as _th
-
     _ensure_imports()
-    from api import _ingest_state, _run_ingest_in_thread
 
     if mode not in ("all", "new"):
         return {"error": f"mode must be 'all' or 'new', got {mode!r}"}
 
-    if _ingest_state["running"]:
+    if is_ingest_running():
         return {"status": "already_running", "message": "A crawl is already in progress"}
 
     from store import list_urls as _urls, update_url_status as _update_status
@@ -541,7 +541,7 @@ async def trigger_crawl(mode: str = "all") -> dict:
             if u["status"] in ("completed", "failed"):
                 _update_status(u["id"], "pending")
 
-    _ingest_state.update({
+    set_ingest_state({
         "running": True,
         "status": "running",
         "total_urls": len(pending),
@@ -551,7 +551,9 @@ async def trigger_crawl(mode: str = "all") -> dict:
         "message": f"Crawl started ({mode} mode)",
     })
 
-    _th.Thread(target=_run_ingest_in_thread, args=(mode,), daemon=True).start()
+    t = _th.Thread(target=_run_ingest_in_thread, args=(mode,), daemon=True)
+    set_ingest_thread(t)
+    t.start()
 
     return {
         "status": "started",

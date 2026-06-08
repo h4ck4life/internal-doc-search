@@ -5,6 +5,7 @@ result normalization, source-diversity capping, and low-relevance hint generatio
 Used by both `api.py` and `mcp_server.py` to ensure identical behavior.
 """
 
+import hashlib
 import math
 from typing import Any, Optional, Sequence
 
@@ -14,6 +15,12 @@ from qdrant_client import models
 # Single place to define which Qdrant payload fields appear in search
 # results and their defaults. Add new metadata fields HERE only — both
 # normalize_results() and apply_label_boost() use _build_result().
+
+
+def _sigmoid(x: float) -> float:
+    """Stable sigmoid — shared by normalize_results and apply_label_boost."""
+    return 1.0 / (1.0 + math.exp(-x))
+
 
 RESULT_PAYLOAD_MAP: dict[str, tuple[str, Any]] = {
     "url":            ("url",            ""),
@@ -138,19 +145,16 @@ def apply_label_boost(
         List of result dicts (same shape as /search response), sorted by
         the blended final_score descending.
     """
-    def sigmoid(x: float) -> float:
-        return 1.0 / (1.0 + math.exp(-x))
-
     seen: set = set()
     combined: list[dict] = []
     for point, ce_score in zip(points, ce_scores):
         content = point.payload.get("content", "")
-        fp = hash(content[:100])
+        fp = hashlib.sha256(content[:100].encode()).hexdigest()
         if fp in seen:
             continue
         seen.add(fp)
 
-        ce = sigmoid(float(ce_score))
+        ce = _sigmoid(float(ce_score))
         chunk_label = point.payload.get("label", "") or ""
         match = 1.0 if (positive and chunk_label in positive) else 0.0
         if positive:
@@ -194,20 +198,17 @@ def normalize_results(
     Returns:
         Top-N result dicts sorted by cross_encoder_score descending.
     """
-    def sigmoid(x: float) -> float:
-        return 1.0 / (1.0 + math.exp(-x))
-
     seen: set = set()
     combined: list[dict] = []
     for point, ce_score in zip(points, ce_scores):
         content = point.payload.get("content", "")
-        fp = hash(content[:100])
+        fp = hashlib.sha256(content[:100].encode()).hexdigest()
         if fp in seen:
             continue
         seen.add(fp)
 
         r = _build_result(point)
-        r["cross_encoder_score"] = round(sigmoid(float(ce_score)), 4)
+        r["cross_encoder_score"] = round(_sigmoid(float(ce_score)), 4)
         if not include_all_metadata:
             for key in ("page_title", "section_heading", "content_type", "total_chunks"):
                 r.pop(key, None)
