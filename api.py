@@ -110,7 +110,7 @@ class URLInput(BaseModel):
     label: str = ""
     labels: list[str] = []
     deep_crawl: bool = False
-    deep_crawl_max_depth: int = 3
+    deep_crawl_max_depth: int = 1
     deep_crawl_url_pattern: str = ""
     deep_crawl_exclude_pattern: str = ""
 

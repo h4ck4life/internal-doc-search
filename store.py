@@ -39,7 +39,7 @@ def init_db() -> None:
                 chunk_count INTEGER DEFAULT 0,
                 error_message TEXT,
                 deep_crawl INTEGER DEFAULT 0,
-                deep_crawl_max_depth INTEGER DEFAULT 3,
+                deep_crawl_max_depth INTEGER DEFAULT 1,
                 deep_crawl_url_pattern TEXT DEFAULT '',
                 deep_crawl_exclude_pattern TEXT DEFAULT '',
                 created_at TEXT NOT NULL
@@ -63,7 +63,7 @@ def init_db() -> None:
 
         # Migrate: add deep_crawl columns if upgrading from old schema
         _migrate_add_column(conn, "urls", "deep_crawl", "INTEGER DEFAULT 0")
-        _migrate_add_column(conn, "urls", "deep_crawl_max_depth", "INTEGER DEFAULT 3")
+        _migrate_add_column(conn, "urls", "deep_crawl_max_depth", "INTEGER DEFAULT 1")
         _migrate_add_column(conn, "urls", "deep_crawl_url_pattern", "TEXT DEFAULT ''")
         _migrate_add_column(conn, "urls", "deep_crawl_exclude_pattern", "TEXT DEFAULT ''")
         _migrate_add_column(conn, "urls", "parent_url_id", "INTEGER REFERENCES urls(id)")
@@ -153,7 +153,7 @@ def validate_url_input(
     label: str = "",
     labels: Optional[List[str]] = None,
     deep_crawl: bool = False,
-    deep_crawl_max_depth: int = 3,
+    deep_crawl_max_depth: int = 1,
     deep_crawl_exclude_pattern: str = "",
 ):
     """Validate an add-URL payload. Pure function (no DB access).
@@ -198,7 +198,7 @@ def validate_url_input(
 
 
 def add_url(url: str, label: str = "", labels: Optional[List[str]] = None,
-            deep_crawl: bool = False, deep_crawl_max_depth: int = 3,
+            deep_crawl: bool = False, deep_crawl_max_depth: int = 1,
             deep_crawl_url_pattern: str = "", deep_crawl_exclude_pattern: str = "") -> dict:
     """Add a URL to crawl. Returns the created row as dict with a 'labels' list.
 
@@ -246,7 +246,7 @@ def add_discovered_url(
     parent_id: int,
     labels: List[str],
     deep_crawl: bool = False,
-    deep_crawl_max_depth: int = 3,
+    deep_crawl_max_depth: int = 1,
     deep_crawl_url_pattern: str = "",
     deep_crawl_exclude_pattern: str = "",
 ) -> Optional[dict]:

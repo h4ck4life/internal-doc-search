@@ -12,6 +12,7 @@ Tools:
 Run: `fastmcp run mcp_server.py` (standalone) or mounted in FastAPI via `mcp.http_app()`
 """
 
+import re
 import threading as _th
 from typing import Optional
 
@@ -54,15 +55,190 @@ def _ensure_imports():
     _imports_loaded = True
 
 
+def _query_variants(query: str) -> list[str]:
+    """Generate simple alternate query phrasings for agent retry guidance."""
+    q = " ".join((query or "").split())
+    if not q:
+        return []
+
+    variants = [q]
+    simplified = re.sub(
+        r"\b(how|do|does|can|could|should|what|where|when|why|which|is|are|the|a|an|to|for|with|about)\b",
+        " ",
+        q,
+        flags=re.IGNORECASE,
+    )
+    simplified = " ".join(simplified.split(" ?,:;.-"))
+    simplified = " ".join(simplified.split())
+    if simplified and simplified.lower() != q.lower():
+        variants.append(simplified)
+
+    acronym_expansions = {
+        "sso": "single sign on",
+        "mfa": "multi factor authentication",
+        "2fa": "two factor authentication",
+        "api": "endpoint request response",
+        "jwt": "token claims bearer",
+        "oauth": "authorization token refresh client credentials",
+        "oidc": "openid connect authentication",
+    }
+    q_lower = q.lower()
+    expanded_terms = [v for k, v in acronym_expansions.items() if re.search(rf"\b{re.escape(k)}\b", q_lower)]
+    if expanded_terms:
+        variants.append(f"{q} {' '.join(expanded_terms)}")
+
+    problem_framing = re.sub(r"\b(error|issue|problem|failed|fails|failure)\b", "troubleshooting configuration", q, flags=re.IGNORECASE)
+    if problem_framing.lower() != q.lower():
+        variants.append(problem_framing)
+
+    out = []
+    for v in variants:
+        if v and v not in out:
+            out.append(v)
+    return out[:4]
+
+
+async def _available_label_names(client) -> list[str]:
+    """Return sorted labels present in stored chunks."""
+    label_agg: dict[str, int] = {}
+    offset = None
+    while True:
+        points, offset = await client.scroll(
+            collection_name=COLLECTION_NAME,
+            offset=offset,
+            limit=500,
+            with_payload=["label"],
+            with_vectors=False,
+        )
+        for p in points:
+            label = (p.payload.get("label") or "").strip()
+            if label:
+                label_agg[label] = label_agg.get(label, 0) + 1
+        if offset is None:
+            break
+    return sorted(label_agg.keys())
+
+
+def _search_guidance(
+    query: str,
+    available_labels: list[str],
+    labels: Optional[list[str]],
+    label_match_mode: str,
+    result_count: int,
+    max_ce: float,
+) -> dict:
+    """Build structured MCP guidance so agents keep searching productively."""
+    positive, negative = parse_labels(labels)
+    guidance: dict = {
+        "query_variants_to_try": _query_variants(query),
+        "available_labels": available_labels[:50],
+        "current_filters": {
+            "labels": positive,
+            "excluded_labels": negative,
+            "label_match_mode": label_match_mode,
+        },
+        "next_steps": [],
+    }
+
+    if not available_labels:
+        guidance["next_steps"].append({
+            "tool": "add_url_to_crawl",
+            "when": "No indexed labels/chunks exist yet, or the corpus is empty.",
+            "why": "Search cannot succeed until documentation URLs have been crawled.",
+        })
+        guidance["next_steps"].append({
+            "tool": "trigger_crawl",
+            "when": "URLs have been added but no chunks are searchable yet.",
+            "why": "Runs ingestion so search_docs has content to retrieve.",
+        })
+        return guidance
+
+    if not positive and not negative:
+        guidance["next_steps"].append({
+            "tool": "list_labels",
+            "when": "Before declaring no answer from an unfiltered search.",
+            "why": "Pick the closest topic/language label and re-run search_docs scoped to it.",
+        })
+        guidance["next_steps"].append({
+            "tool": "search_docs",
+            "arguments": {
+                "query": query,
+                "limit": 10,
+                "labels": ["<closest label from available_labels>"],
+                "label_match_mode": "boost",
+            },
+            "why": "Boost mode keeps cross-topic evidence while preferring the likely label.",
+        })
+    elif label_match_mode == "hard":
+        guidance["next_steps"].append({
+            "tool": "search_docs",
+            "arguments": {
+                "query": query,
+                "limit": 10,
+                "labels": positive + [f"-{x}" for x in negative],
+                "label_match_mode": "boost",
+            },
+            "why": "If a hard label filter is too narrow, boost mode can recover nearby cross-label matches.",
+        })
+        guidance["next_steps"].append({
+            "tool": "search_docs",
+            "arguments": {"query": query, "limit": 10, "labels": [], "label_match_mode": "hard"},
+            "why": "A broad unfiltered search can reveal mislabeled or adjacent documentation.",
+        })
+
+    for variant in guidance["query_variants_to_try"][1:]:
+        guidance["next_steps"].append({
+            "tool": "search_docs",
+            "arguments": {
+                "query": variant,
+                "limit": 10,
+                "labels": positive,
+                "label_match_mode": "boost" if positive else "hard",
+            },
+            "why": "Different wording can match terminology used in the indexed docs.",
+        })
+
+    if result_count > 0:
+        guidance["next_steps"].append({
+            "tool": "get_adjacent_chunks",
+            "arguments": {
+                "url": "<url from the best search result>",
+                "chunk_index": "<chunk_index from that result>",
+                "page_index": "<page_index from that result>",
+                "window": 2,
+            },
+            "why": "The answer may be in neighboring chunks even when the returned chunk is incomplete.",
+        })
+        guidance["next_steps"].append({
+            "tool": "get_chunks_for_url",
+            "arguments": {"url": "<url from the best search result>", "limit": 50},
+            "why": "Fetch the full source document before concluding the topic is absent.",
+        })
+
+    if max_ce < 0.3:
+        guidance["caution"] = (
+            "Low cross-encoder score. Treat current results as leads, not proof of absence. "
+            "Try label scoping, boost mode, and query variants first."
+        )
+
+    return guidance
+
+
 @mcp.tool()
 async def list_labels() -> list[dict]:
     """List all available documentation labels with chunk and URL counts.
 
-    Call this BEFORE search_docs() when the user's question is about a specific
-    topic. The results tell you what labels exist so you can pick the right
-    filter — labels are user-defined per crawl source (e.g. "Auth", "Pricing",
-    "API Docs"). Pass the chosen label(s) to search_docs(labels=[...]) to scope
-    the search to that topic.
+    Use this as the map of the indexed corpus. Call it before a focused search,
+    and call it again when search_docs() returns weak/empty results. Labels are
+    user-defined source/topic/language tags (for example "Auth", "Pricing",
+    "API Docs"). Pick likely labels from this list and retry search_docs() with
+    labels=[...] rather than assuming the corpus has no answer.
+
+    Effective agent workflow:
+    1. Read labels and infer likely domains/languages.
+    2. Search unfiltered if the topic is ambiguous.
+    3. Search with the closest label in hard mode for precision.
+    4. Search with the closest label in boost mode if hard mode is weak.
 
     Returns:
         List of {label, chunks, urls} sorted by chunk count descending.
@@ -114,17 +290,26 @@ async def search_docs(
 ) -> dict:
     """Semantic search across crawled documentation with two-stage retrieval.
 
-    CRITICAL — Always call list_labels() FIRST when the user's question is about a
-    specific topic. Search without labels returns low-relevance results. If results
-    include a _hint field, you MUST immediately re-search with one of the suggested
-    labels — the hint means the corpus may be in a different domain than your query.
+    Do not give up after one weak or empty call. Search is sensitive to labels,
+    wording, acronyms, and source chunk boundaries. If results are empty, weak,
+    or only partially useful, follow the returned `_guidance.next_steps` before
+    telling the user nothing was found.
 
-    Tip: If the question is topic-specific, call list_labels() first, then pass
-    the matching label(s) here to scope results.
+    Recommended agent strategy:
+    1. Call list_labels() to understand available topics/languages.
+    2. Try a broad query without labels if the correct source is unclear.
+    3. Retry with the closest label(s) in hard mode for precision.
+    4. Retry with label_match_mode="boost" to recover adjacent/mislabeled docs.
+    5. Rephrase with product terms, endpoint names, acronyms expanded, and error
+       words replaced by troubleshooting/configuration terms.
+    6. When a result is plausible, call get_adjacent_chunks() or
+       get_chunks_for_url() before deciding the source lacks the answer.
 
     Args:
-        query: The search query (natural language question)
-        limit: Maximum number of results (1-20, default 5)
+        query: The search query. Use concrete domain terms, endpoint names,
+            UI labels, error messages, config keys, and synonyms when retrying.
+        limit: Maximum number of results (1-20, default 5). Use 10+ while
+            exploring; use smaller limits only after you know the best source.
         labels: Optional list of labels to filter by.
             - Omit or pass [] to search all docs.
             - Pass ["Auth", "Pricing"] to include any-of (OR).
@@ -133,10 +318,11 @@ async def search_docs(
             - Comma-separated strings also accepted: ["Auth, Pricing"].
         label_match_mode: "hard" (default) — strict label filter, only matching
             labels returned. "boost" — fetch 3× candidates, blend label-match
-            bonus into scores so cross-topic results can still surface.
+            bonus into scores so cross-topic/mislabeled results can still surface.
 
     Returns:
-        Dict with "results" list and an optional "_hint" when relevance is low.
+        Dict with "results" list, "_guidance" retry plan, and optional "_hint"
+        when relevance is low. Treat "_guidance" as the next action plan.
         Each result has: cross_encoder_score, score, url, label, chunk_index,
         page_index, content, page_title, section_heading, content_type,
         total_chunks.
@@ -175,8 +361,21 @@ async def search_docs(
             query_kwargs["query_filter"] = qfilter
         results = await client.query_points(**query_kwargs)
 
+        available_labels: Optional[list[str]] = None
+
         if not results.points:
-            return {"results": []}
+            available_labels = await _available_label_names(client)
+            return {
+                "results": [],
+                "_guidance": _search_guidance(
+                    query=query,
+                    available_labels=available_labels,
+                    labels=labels,
+                    label_match_mode=label_match_mode,
+                    result_count=0,
+                    max_ce=0.0,
+                ),
+            }
 
         # Stage 2: Cross-encoder rerank
         pairs = [(query, p.payload.get("content", "")) for p in results.points]
@@ -203,29 +402,33 @@ async def search_docs(
 
         # Low-relevance hint
         max_ce = max((r["cross_encoder_score"] for r in normalized), default=0)
+        if max_ce < 0.45 or len(normalized) < limit:
+            available_labels = available_labels or await _available_label_names(client)
+
         response = {"results": normalized}
-        if max_ce < 0.3 and not (positive or negative):
-            # Query all labels so the LLM knows what topics/languages exist
-            label_agg: dict[str, int] = {}
-            offset = None
-            while True:
-                pts, offset = await client.scroll(
-                    collection_name=COLLECTION_NAME,
-                    offset=offset,
-                    limit=500,
-                    with_payload=["label"],
-                    with_vectors=False,
-                )
-                for p in pts:
-                    lbl = (p.payload.get("label") or "").strip()
-                    if lbl:
-                        label_agg[lbl] = label_agg.get(lbl, 0) + 1
-                if offset is None:
-                    break
-            available = sorted(label_agg.keys()) if label_agg else []
+        if available_labels is not None:
+            response["_guidance"] = _search_guidance(
+                query=query,
+                available_labels=available_labels,
+                labels=labels,
+                label_match_mode=label_match_mode,
+                result_count=len(normalized),
+                max_ce=max_ce,
+            )
+
+        if max_ce < 0.3:
+            available = available_labels or await _available_label_names(client)
             hint = generate_low_relevance_hint(max_ce, query, available)
             if hint:
                 hint["results"] = normalized
+                hint["_guidance"] = response.get("_guidance") or _search_guidance(
+                    query=query,
+                    available_labels=available,
+                    labels=labels,
+                    label_match_mode=label_match_mode,
+                    result_count=len(normalized),
+                    max_ce=max_ce,
+                )
                 return hint
 
         return response
@@ -241,9 +444,15 @@ async def get_chunks_for_url(
 ) -> dict:
     """Fetch all chunks stored for a specific URL, with pagination.
 
-    Use this after search_docs() when you find a promising result and want
-    to see all content from that source. Useful for getting full document
-    context beyond the snippet returned by search.
+    Use this after search_docs() when a result is plausible but incomplete.
+    Do this before saying "not found" if the best source looks related by URL,
+    title, section heading, or label. Search returns individual chunks; the
+    answer may be elsewhere in the same page.
+
+    Agent workflow:
+    - Pass the exact `url` from a search result.
+    - Read chunks in order, using offset pagination when total > limit.
+    - Prefer this over repeated semantic searches once you have a likely source.
 
     Args:
         url: The exact URL to fetch chunks for (from a search result's "url" field).
@@ -321,9 +530,13 @@ async def get_adjacent_chunks(
 ) -> dict:
     """Fetch chunks surrounding a specific chunk for context exploration.
 
-    Use this when a search result's content snippet is promising but you
-    need surrounding context — what comes before or after this chunk in
-    the original document.
+    Use this immediately after a promising search result when the returned chunk
+    is relevant but does not fully answer the user. Many documentation answers
+    span chunk boundaries: definitions appear before a result, while examples,
+    warnings, parameters, or troubleshooting steps appear after it.
+
+    Before giving up on a weak result, fetch at least window=2 around the best
+    candidate and inspect the surrounding chunks.
 
     Args:
         url: The exact URL (from a search result's "url" field).
@@ -402,7 +615,7 @@ async def add_url_to_crawl(
     label: str = "",
     labels: list[str] | None = None,
     deep_crawl: bool = False,
-    deep_crawl_max_depth: int = 3,
+    deep_crawl_max_depth: int = 1,
     deep_crawl_url_pattern: str = "",
     deep_crawl_exclude_pattern: str = "",
 ) -> dict:

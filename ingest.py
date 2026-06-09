@@ -342,7 +342,7 @@ async def run_ingest(on_progress=None, only_pending: bool = False, url_id: Optio
                 url = url_entry["url"]
                 label = url_entry.get("label", "") or ""
                 deep_crawl = bool(url_entry.get("deep_crawl", 0))
-                max_depth = url_entry.get("deep_crawl_max_depth", 3)
+                max_depth = url_entry.get("deep_crawl_max_depth", 1)
                 url_pattern = url_entry.get("deep_crawl_url_pattern", "") or ""
                 exclude_pattern = url_entry.get("deep_crawl_exclude_pattern", "") or ""
 
