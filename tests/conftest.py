@@ -80,8 +80,23 @@ def temp_db():
 
 
 @pytest.fixture
-def client():
-    """Create a FastAPI TestClient (models not loaded for unit tests)."""
+def client(monkeypatch):
+    """Create a FastAPI TestClient with model loading mocked.
+
+    Patches both shared._load_models (the source) and api._load_models
+    (the imported reference) to skip HuggingFace downloads.
+    """
     from api import app
+
+    def _noop_load_models():
+        import shared
+        from unittest.mock import MagicMock
+        shared.bi_encoder = MagicMock()
+        shared.cross_encoder = MagicMock()
+
+    # api.py imports _load_models at module level, so we must patch
+    # the imported reference as well as the source.
+    monkeypatch.setattr("shared._load_models", _noop_load_models)
+    monkeypatch.setattr("api._load_models", _noop_load_models)
     with TestClient(app) as c:
         yield c

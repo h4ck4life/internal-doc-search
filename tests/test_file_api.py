@@ -1,0 +1,226 @@
+"""Tests for file API endpoints via FastAPI TestClient."""
+
+import io
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+
+# ─── POST /files ───────────────────────────────────────────────────
+
+
+def test_upload_file_no_labels(client):
+    """POST /files without labels returns 400."""
+    resp = client.post(
+        "/files",
+        files={"file": ("test.txt", io.BytesIO(b"content"), "text/plain")},
+        data={"labels": ""},
+    )
+    assert resp.status_code == 400
+    assert "label" in resp.json()["detail"].lower()
+
+
+def test_upload_file_unsupported_extension(client):
+    """POST /files with unsupported extension returns 400."""
+    resp = client.post(
+        "/files",
+        files={"file": ("image.png", io.BytesIO(b"pngdata"), "image/png")},
+        data={"labels": "Docs"},
+    )
+    assert resp.status_code == 400
+    assert "unsupported" in resp.json()["detail"].lower()
+
+
+def test_upload_file_empty(client):
+    """POST /files with empty file returns 400."""
+    resp = client.post(
+        "/files",
+        files={"file": ("empty.txt", io.BytesIO(b""), "text/plain")},
+        data={"labels": "Docs"},
+    )
+    assert resp.status_code == 400
+    assert "empty" in resp.json()["detail"].lower()
+
+
+def test_upload_file_success(client, temp_db):
+    """POST /files with valid file returns 201 and record."""
+    # Mock the background thread so it doesn't try to process
+    with patch("api.threading.Thread") as MockThread, \
+         patch("file_processor.detect_file_type", return_value=("txt", MagicMock())):
+        resp = client.post(
+            "/files",
+            files={"file": ("hello.txt", io.BytesIO(b"Hello world"), "text/plain")},
+            data={"labels": "Auth, API"},
+        )
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data["filename"] == "hello.txt"
+        assert data["file_type"] == "txt"
+        assert data["file_size"] == 11
+        assert data["status"] == "pending"
+        assert set(data["labels"]) == {"Auth", "API"}
+        MockThread.assert_called_once()
+
+
+def test_upload_file_spawns_background_thread(client, temp_db):
+    """Verify upload spawns a daemon thread for processing."""
+    with patch("api.threading.Thread") as MockThread, \
+         patch("file_processor.detect_file_type", return_value=("txt", MagicMock())):
+        mock_thread = MagicMock()
+        MockThread.return_value = mock_thread
+
+        client.post(
+            "/files",
+            files={"file": ("doc.txt", io.BytesIO(b"text"), "text/plain")},
+            data={"labels": "Docs"},
+        )
+        mock_thread.start.assert_called_once()
+
+
+# ─── GET /files ────────────────────────────────────────────────────
+
+
+def test_list_files_empty(client, temp_db):
+    """GET /files with no files returns empty list."""
+    resp = client.get("/files")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert isinstance(data, list)
+    assert len(data) == 0
+
+
+def test_list_files_with_data(client, temp_db):
+    """GET /files returns stored files."""
+    temp_db.add_file("a.txt", "txt", 10, ["A"])
+    temp_db.add_file("b.pdf", "pdf", 20, ["B"])
+
+    resp = client.get("/files")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data) == 2
+    # Most recent first
+    assert data[0]["filename"] == "b.pdf"
+    assert data[1]["filename"] == "a.txt"
+
+
+def test_list_files_pagination(client, temp_db):
+    """GET /files supports limit and offset params."""
+    for i in range(3):
+        temp_db.add_file(f"f{i}.txt", "txt", 10, ["Docs"])
+
+    resp = client.get("/files?limit=2&offset=0")
+    assert len(resp.json()) == 2
+
+    resp = client.get("/files?limit=2&offset=2")
+    assert len(resp.json()) == 1
+
+
+# ─── DELETE /files/{id} ────────────────────────────────────────────
+
+
+def test_delete_file_not_found(client):
+    """DELETE /files/{id} with nonexistent id returns 404."""
+    resp = client.delete("/files/9999")
+    assert resp.status_code == 404
+
+
+def test_delete_file_success(client, temp_db):
+    """DELETE /files/{id} removes file and returns success."""
+    record = temp_db.add_file("remove.pdf", "pdf", 100, ["Docs"])
+
+    with patch("api.AsyncQdrantClient") as MockQdrant:
+        mock_client = MagicMock()
+        mock_client.delete = AsyncMock()
+        mock_client.close = AsyncMock()
+        MockQdrant.return_value = mock_client
+
+        resp = client.delete(f"/files/{record['id']}")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["deleted"] is True
+        assert data["filename"] == "remove.pdf"
+
+
+def test_delete_file_cleans_qdrant_vectors(client, temp_db):
+    """DELETE /files/{id} calls Qdrant delete by file_id."""
+    record = temp_db.add_file("clean.pdf", "pdf", 200, ["Docs"])
+
+    with patch("api.AsyncQdrantClient") as MockQdrant:
+        mock_client = MagicMock()
+        mock_client.delete = AsyncMock()
+        mock_client.close = AsyncMock()
+        MockQdrant.return_value = mock_client
+
+        resp = client.delete(f"/files/{record['id']}")
+        assert resp.status_code == 200
+        mock_client.delete.assert_awaited_once()
+
+
+# ─── POST /files/bulk-delete ───────────────────────────────────────
+
+
+def test_bulk_delete_empty_ids(client):
+    """POST /files/bulk-delete with empty ids returns 400."""
+    resp = client.post("/files/bulk-delete", json={"ids": []})
+    assert resp.status_code == 400
+
+
+def test_bulk_delete_missing_ids(client):
+    """POST /files/bulk-delete without ids key returns 400."""
+    resp = client.post("/files/bulk-delete", json={})
+    assert resp.status_code == 400
+
+
+def test_bulk_delete_success(client, temp_db):
+    """Bulk delete removes multiple files."""
+    r1 = temp_db.add_file("a.txt", "txt", 10, ["A"])
+    r2 = temp_db.add_file("b.txt", "txt", 10, ["B"])
+
+    with patch("api.AsyncQdrantClient") as MockQdrant:
+        mock_client = MagicMock()
+        mock_client.delete = AsyncMock()
+        mock_client.close = AsyncMock()
+        MockQdrant.return_value = mock_client
+
+        resp = client.post("/files/bulk-delete", json={"ids": [r1["id"], r2["id"]]})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["deleted"] == 2
+        assert data["not_found"] == 0
+
+        assert temp_db.get_file(r1["id"]) is None
+        assert temp_db.get_file(r2["id"]) is None
+
+
+def test_bulk_delete_mixed(client, temp_db):
+    """Bulk delete with mix of existing and nonexistent IDs."""
+    r1 = temp_db.add_file("a.txt", "txt", 10, ["A"])
+
+    with patch("api.AsyncQdrantClient") as MockQdrant:
+        mock_client = MagicMock()
+        mock_client.delete = AsyncMock()
+        mock_client.close = AsyncMock()
+        MockQdrant.return_value = mock_client
+
+        resp = client.post("/files/bulk-delete", json={"ids": [r1["id"], 9999]})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["deleted"] == 1
+        assert data["not_found"] == 1
+
+
+# ─── /docs-summary includes file stats ─────────────────────────────
+
+
+def test_docs_summary_includes_file_stats(client, temp_db):
+    """GET /docs-summary returns files_uploaded and file_chunks."""
+    r1 = temp_db.add_file("a.txt", "txt", 10, ["A"])
+    temp_db.update_file_status(r1["id"], chunk_count=5)
+
+    resp = client.get("/docs-summary")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "files_uploaded" in data
+    assert "file_chunks" in data
+    assert data["files_uploaded"] == 1
+    assert data["file_chunks"] == 5

@@ -105,6 +105,34 @@
   .stat-val.sm { font-size: 0.92rem; font-weight: 600; line-height: 1.3; }
   .stat-label { font-size: 0.64rem; text-transform: uppercase; letter-spacing: 0.09em; color: var(--muted); margin-top: 0.4rem; }
 
+  /* ───────────────────────── Tab navigation ───────────────────────── */
+  .tab-nav { display: flex; gap: 0.25rem; margin-bottom: 1.25rem; border-bottom: 1px solid var(--border); padding-bottom: 0; }
+  .tab-btn {
+    background: transparent; border: 1px solid transparent; border-bottom: none;
+    color: var(--muted); padding: 0.5rem 0.9rem; font-size: 0.82rem;
+    font-weight: 500; border-radius: 9px 9px 0 0; cursor: pointer;
+    transition: color 0.15s, border-color 0.15s, background 0.15s;
+  }
+  .tab-btn:hover { color: var(--text); background: var(--surface-2); }
+  .tab-btn.active {
+    color: var(--accent); background: var(--surface);
+    border-color: var(--border); border-bottom-color: var(--surface);
+    margin-bottom: -1px;
+  }
+  .tab-section { display: none; }
+  .tab-section.active { display: block; }
+
+  /* File type badges */
+  .badge-file { display: inline-block; font-size: 0.62rem; font-weight: 600; letter-spacing: 0.04em;
+    padding: 0.12rem 0.45rem; border-radius: 9999px; text-transform: uppercase; }
+  .badge-pdf  { background: rgba(248,81,73,0.15);  color: #f87171; }
+  .badge-docx { background: rgba(88,166,255,0.15);  color: #79b8ff; }
+  .badge-txt  { background: rgba(139,148,158,0.15); color: #c9d1d9; }
+  .badge-md   { background: rgba(139,148,158,0.15); color: #c9d1d9; }
+  .badge-html { background: rgba(210,153,34,0.15);  color: #d29922; }
+  .badge-csv  { background: rgba(63,185,80,0.15);   color: #56d364; }
+  .badge-json { background: rgba(163,113,247,0.18); color: #a371f7; }
+
   /* ───────────────────────── Collapsible sections ───────────────────────── */
   details.card > summary { list-style: none; cursor: pointer; user-select: none;
     display: flex; align-items: center; gap: 0.55rem;
@@ -313,8 +341,17 @@
 
   <div id="crawlMsg" class="status-msg hidden"></div>
 
+  <!-- ─── Tab Nav ─────────────────────────────────────────────── -->
+  <nav class="tab-nav" id="mainTabs">
+    <button class="tab-btn active" data-tab="search" onclick="switchTab('search')">🔎 Search</button>
+    <button class="tab-btn" data-tab="urls" onclick="switchTab('urls')">🔗 URLs</button>
+    <button class="tab-btn" data-tab="documents" onclick="switchTab('documents')">📄 Documents</button>
+    <button class="tab-btn" data-tab="config" onclick="switchTab('config')">⚙️ Config</button>
+    <button class="tab-btn" data-tab="api" onclick="switchTab('api')">📋 API &amp; MCP</button>
+  </nav>
+
   <!-- ─── Stats Row ───────────────────────────────────────────── -->
-  <section class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
+  <section class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mb-6">
     <div class="stat">
       <div class="stat-val" id="statUrls">-</div>
       <div class="stat-label">URLs</div>
@@ -331,9 +368,18 @@
       <div class="stat-val sm" id="statLastCrawl">-</div>
       <div class="stat-label">Last Crawl</div>
     </div>
+    <div class="stat">
+      <div class="stat-val" id="statFiles">-</div>
+      <div class="stat-label">Files</div>
+    </div>
+    <div class="stat">
+      <div class="stat-val" id="statFileChunks">-</div>
+      <div class="stat-label">File Chunks</div>
+    </div>
   </section>
 
   <!-- ─── Search ──────────────────────────────────────────────── -->
+  <div class="tab-section active" data-section="search">
   <section class="card card-pad mb-6">
     <div class="section-title">🔎 Search</div>
     <div class="flex gap-2 items-stretch">
@@ -357,8 +403,10 @@
     <!-- Results -->
     <div id="searchResults" class="mt-4 space-y-3"></div>
   </section>
+  </div><!-- /tab-section search -->
 
   <!-- ─── URLs ────────────────────────────────────────────────── -->
+  <div class="tab-section" data-section="urls">
   <details open class="card overflow-hidden mb-5">
     <summary><span class="chev">▸</span>🔗 URLs</summary>
     <div class="details-body">
@@ -425,8 +473,61 @@
 
     </div>
   </details>
+  </div><!-- /tab-section urls -->
+
+  <!-- ─── Documents ───────────────────────────────────────────── -->
+  <div class="tab-section" data-section="documents">
+  <section class="card card-pad mb-6">
+    <div class="section-title">📄 Upload Document</div>
+
+    <!-- Upload form -->
+    <div class="flex flex-wrap gap-2 items-end">
+      <input type="file" id="fileInput" accept=".pdf,.docx,.txt,.md,.html,.htm,.csv,.json"
+             class="field flex-[2] min-w-[180px]" style="padding:0.45rem 0.7rem">
+      <input type="text" id="fileLabels" placeholder="Labels (required, comma-separated, e.g. Auth, API)"
+             class="field flex-1 min-w-[140px]" onkeydown="if(event.key==='Enter')uploadFile()">
+      <button id="uploadBtn" onclick="uploadFile()" class="btn btn-primary flex-shrink-0">📤 Upload</button>
+    </div>
+    <div class="help mt-1">Supported: PDF, DOCX, TXT, MD, HTML, CSV, JSON. Max 50 MB. At least one label is required<span class="req-star">*</span>.</div>
+
+    <div id="fileMsg" class="status-msg hidden" style="margin-top:0.65rem"></div>
+
+    <!-- Bulk delete bar -->
+    <div id="fileBulkBar" class="hidden" style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;margin-top:0.75rem;padding:0.5rem 0.75rem;background:var(--surface-2);border:1px solid var(--border);border-radius:9px">
+      <span id="fileBulkCount" style="font-size:0.82rem;font-weight:600">0 selected</span>
+      <button id="fileBulkDeleteBtn" class="btn btn-sm" style="border:1px solid rgba(248,81,73,0.4);color:var(--red);background:transparent" onclick="bulkDeleteFiles()">🗑 Delete selected</button>
+      <button class="btn btn-ghost btn-sm" onclick="clearFileSelection()">Clear</button>
+    </div>
+
+    <!-- File table -->
+    <div class="table-scroll mt-3">
+      <table class="url-table">
+        <colgroup>
+          <col style="width:34px"><col style="width:28%"><col style="width:8%"><col style="width:8%">
+          <col style="width:16%"><col style="width:8%"><col style="width:16%"><col style="width:8%">
+        </colgroup>
+        <thead>
+          <tr>
+            <th style="text-align:center;cursor:default"><input type="checkbox" id="fileSelectAll" onclick="toggleFileSelectAll(this.checked)"></th>
+            <th data-key="filename" onclick="sortFiles('filename')">Filename<span class="sort-ind">↕</span></th>
+            <th data-key="type" onclick="sortFiles('type')">Type<span class="sort-ind">↕</span></th>
+            <th data-key="size" onclick="sortFiles('size')">Size<span class="sort-ind">↕</span></th>
+            <th data-key="labels" onclick="sortFiles('labels')">Labels<span class="sort-ind">↕</span></th>
+            <th data-key="chunks" onclick="sortFiles('chunks')">Chunks<span class="sort-ind">↕</span></th>
+            <th data-key="added" onclick="sortFiles('added')">Added<span class="sort-ind">↕</span></th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="fileTbody">
+          <tr><td colspan="8" class="text-center py-4" style="color:var(--muted)">Click Documents tab to load</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+  </div><!-- /tab-section documents -->
 
   <!-- ─── Config ──────────────────────────────────────────────── -->
+  <div class="tab-section" data-section="config">
   <details class="card overflow-hidden mb-5">
     <summary><span class="chev">▸</span>⚙️ Configuration</summary>
     <form id="configForm" onsubmit="saveConfig(event)" class="details-body">
@@ -481,25 +582,30 @@
       <div id="configMsg" class="status-msg hidden"></div>
     </form>
   </details>
+  </div><!-- /tab-section config -->
 
   <!-- ─── API Endpoints ───────────────────────────────────────── -->
+  <div class="tab-section" data-section="api">
   <details class="card overflow-hidden mb-5">
-    <summary><span class="chev">▸</span>📋 API Endpoints <span class="help" style="font-weight:400">(14)</span></summary>
+    <summary><span class="chev">▸</span>📋 API Endpoints <span class="help" style="font-weight:400">(17)</span></summary>
     <div class="details-body" style="padding-top:0.4rem">
       <div class="api-row"><span class="method get">GET</span><span class="api-path">/search?q=&limit=&label=</span><span class="api-desc">Two-stage semantic search; multi-label (OR) with -prefix exclusion</span></div>
       <div class="api-row"><span class="method get">GET</span><span class="api-path">/labels</span><span class="api-desc">List distinct labels (with URL counts) for chip-based search</span></div>
       <div class="api-row"><span class="method get">GET</span><span class="api-path">/health</span><span class="api-desc">Service readiness — Qdrant connectivity check</span></div>
       <div class="api-row"><span class="method post">POST</span><span class="api-path">/ingest</span><span class="api-desc">Start background re-crawl (409 if already running)</span></div>
       <div class="api-row"><span class="method get">GET</span><span class="api-path">/ingest/status</span><span class="api-desc">Current crawl progress (running/total/chunks)</span></div>
-      <div class="api-row"><span class="method get">GET</span><span class="api-path">/docs-summary</span><span class="api-desc">URL count, chunk count, last crawl timestamp</span></div>
+      <div class="api-row"><span class="method get">GET</span><span class="api-path">/docs-summary</span><span class="api-desc">URL count, chunk count, last crawl + file stats</span></div>
       <div class="api-row"><span class="method get">GET</span><span class="api-path">/urls</span><span class="api-desc">List all configured crawl URLs with status</span></div>
       <div class="api-row"><span class="method post">POST</span><span class="api-path">/urls</span><span class="api-desc">Add new crawl URL (deep_crawl, deep_crawl_max_depth)</span></div>
       <div class="api-row"><span class="method put">PUT</span><span class="api-path">/urls/{id}</span><span class="api-desc">Update URL string, label, or deep crawl settings</span></div>
-      <div class="api-row"><span class="method del">DEL</span><span class="api-path">/urls/{id}</span><span class="api-desc">Remove crawl URL</span></div>
+      <div class="api-row"><span class="method del">DEL</span><span class="api-path">/urls/{id}</span><span class="api-desc">Remove crawl URL and its vectors</span></div>
       <div class="api-row"><span class="method post">POST</span><span class="api-path">/urls/{id}/recrawl</span><span class="api-desc">Re-crawl a single URL in background</span></div>
+      <div class="api-row"><span class="method post">POST</span><span class="api-path">/files</span><span class="api-desc">Upload document (multipart: file + labels)</span></div>
+      <div class="api-row"><span class="method get">GET</span><span class="api-path">/files</span><span class="api-desc">List uploaded files with labels and chunk counts</span></div>
+      <div class="api-row"><span class="method del">DEL</span><span class="api-path">/files/{id}</span><span class="api-desc">Delete file and its vectors from Qdrant</span></div>
       <div class="api-row"><span class="method get">GET</span><span class="api-path">/config</span><span class="api-desc">Get all configuration values</span></div>
       <div class="api-row"><span class="method put">PUT</span><span class="api-path">/config</span><span class="api-desc">Update configuration (label_match_mode: hard|boost, weight 0–1)</span></div>
-      <div class="api-row mcp"><span class="method mcp">MCP</span><span class="api-path">/mcp</span><span class="api-desc">LLM tools: list_labels, search_docs(labels=[]), add_url_to_crawl, trigger_crawl</span></div>
+      <div class="api-row mcp"><span class="method mcp">MCP</span><span class="api-path">/mcp</span><span class="api-desc">LLM tools: list_labels, search_docs, add_url_to_crawl, trigger_crawl, recrawl_url, get_chunks_for_url, get_adjacent_chunks, upload_file, delete_file, list_files</span></div>
     </div>
   </details>
 
@@ -509,9 +615,12 @@
     <div class="details-body">
       <p class="text-sm" style="color:var(--muted)">
         Add this endpoint to your LLM client to enable semantic doc search from any agent.
-        Four tools: <code class="inline">list_labels</code> (call first to discover topics),
-        <code class="inline">search_docs</code>, <code class="inline">add_url_to_crawl</code>, <code class="inline">trigger_crawl</code>,
-        <code class="inline">recrawl_url</code> (single-URL refresh).
+        Ten tools: <code class="inline">list_labels</code> (call first to discover topics),
+        <code class="inline">search_docs</code>, <code class="inline">get_chunks_for_url</code>,
+        <code class="inline">get_adjacent_chunks</code>, <code class="inline">add_url_to_crawl</code>,
+        <code class="inline">trigger_crawl</code>, <code class="inline">recrawl_url</code>,
+        <code class="inline">upload_file</code>, <code class="inline">delete_file</code>,
+        <code class="inline">list_files</code>.
       </p>
 
       <h3 class="text-base font-semibold mt-5 mb-2">Claude Code</h3>
@@ -543,6 +652,7 @@
       <pre><code>http://localhost:8000/mcp/</code></pre>
     </div>
   </details>
+  </div><!-- /tab-section api -->
 
 </main>
 
@@ -555,7 +665,7 @@
 <!-- ═══════════════════════════════════════════════════════════════ -->
 <script>
 let searchLimit = 7, pollTimer = null, knownLabels = [];
-addEventListener('DOMContentLoaded', () => { loadSummary(); loadUrls(); loadConfig(); loadLabels(); initChipInput(); initCopyButtons(); });
+addEventListener('DOMContentLoaded', () => { loadSummary(); loadUrls(); loadConfig(); loadLabels(); initChipInput(); initCopyButtons(); switchTab('search'); });
 
 async function loadLabels() {
   try {
@@ -576,6 +686,10 @@ function _crawlCard(icon, title, msg, cls) {
 }
 
 async function triggerCrawl(mode) {
+  const _confirmMsg = mode === 'all'
+    ? 'Recrawl ALL URLs? This re-fetches and re-indexes every configured URL and can take a while.'
+    : 'Recrawl new URLs? This crawls only the pending or failed URLs.';
+  if (!confirm(_confirmMsg)) return;
   const btnAll = document.getElementById('crawlBtnAll'), btnNew = document.getElementById('crawlBtnNew');
   const el = document.getElementById('crawlMsg');
   btnAll.disabled = true; btnAll.innerHTML = '<span class="spinner"></span> Starting...';
@@ -657,7 +771,182 @@ async function loadSummary() {
     document.getElementById('statCrawled').textContent = d.urls_crawled ?? '-';
     document.getElementById('statChunks').textContent = d.total_chunks ?? '-';
     document.getElementById('statLastCrawl').textContent = d.last_crawl ? new Date(d.last_crawl).toLocaleString() : 'Never';
+    document.getElementById('statFiles').textContent = d.files_uploaded ?? '-';
+    document.getElementById('statFileChunks').textContent = d.file_chunks ?? '-';
   } catch(e) { console.error(e); }
+}
+
+// ─── Tab switching ────────────────────────────────────────────────
+function switchTab(name) {
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
+  document.querySelectorAll('.tab-section').forEach(s => s.classList.toggle('active', s.dataset.section === name));
+  // Load section data on tab switch
+  if (name === 'urls') loadUrls();
+  if (name === 'documents') loadFiles();
+}
+
+// ─── Files ────────────────────────────────────────────────────────
+let _filesSortKey = null, _filesSortAsc = true, _filesData = [], _selectedFiles = new Set();
+
+function sortFiles(key) {
+  if (_filesSortKey === key) _filesSortAsc = !_filesSortAsc; else { _filesSortKey = key; _filesSortAsc = true; }
+  loadFiles();
+}
+
+function _fmtSize(bytes) {
+  if (!bytes || bytes === 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let i = 0; let v = bytes;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return v.toFixed(i === 0 ? 0 : 1) + ' ' + units[i];
+}
+
+function _fmtFileType(type) {
+  const cls = 'badge-' + (type || 'txt');
+  return `<span class="badge-file ${cls}">${type || '?'}</span>`;
+}
+
+function _fmtFileDate(iso) {
+  try { return new Date(iso).toLocaleString(); } catch { return iso || ''; }
+}
+
+async function loadFiles() {
+  try {
+    const items = await (await fetch('/files')).json();
+    _filesData = items;
+    _renderFileTable();
+  } catch (e) { console.error(e); }
+}
+
+function _renderFileTable() {
+  const tbody = document.getElementById('fileTbody');
+  let data = [..._filesData];
+  if (_filesSortKey) {
+    const k = _filesSortKey;
+    data.sort((a, b) => {
+      let va, vb;
+      if (k === 'filename') { va = a.filename || ''; vb = b.filename || ''; }
+      else if (k === 'type') { va = a.file_type || ''; vb = b.file_type || ''; }
+      else if (k === 'size') { va = a.file_size || 0; vb = b.file_size || 0; }
+      else if (k === 'labels') { va = (a.labels || []).join(','); vb = (b.labels || []).join(','); }
+      else if (k === 'chunks') { va = a.chunk_count || 0; vb = b.chunk_count || 0; }
+      else if (k === 'added') { va = a.created_at || ''; vb = b.created_at || ''; }
+      else { return 0; }
+      if (typeof va === 'number') { const c = va < vb ? -1 : va > vb ? 1 : 0; return _filesSortAsc ? c : -c; }
+      return _filesSortAsc ? String(va).localeCompare(String(vb)) : String(vb).localeCompare(String(va));
+    });
+  }
+  // Paint sort arrows
+  document.querySelectorAll('#fileTbody').forEach(tb => {
+    tb.closest('table')?.querySelectorAll('thead th[data-key]').forEach(th => {
+      th.classList.toggle('sorted', th.dataset.key === _filesSortKey);
+      const ind = th.querySelector('.sort-ind');
+      if (ind) ind.textContent = th.dataset.key === _filesSortKey ? (_filesSortAsc ? '▲' : '▼') : '↕';
+    });
+  });
+
+  if (data.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="8" class="text-center py-4" style="color:var(--muted)">No files uploaded yet</td></tr>';
+    return;
+  }
+  tbody.innerHTML = data.map((f, i) => {
+    const labels = (f.labels || []).map(l => `<span class="chip">${esc(l)}</span>`).join(' ');
+    const checked = _selectedFiles.has(f.id) ? 'checked' : '';
+    return `<tr>
+      <td style="text-align:center"><input type="checkbox" ${checked} onchange="toggleFileSelect(${f.id},this.checked)"></td>
+      <td style="font-family:var(--mono);font-size:0.78rem">${esc(f.filename || '?')}</td>
+      <td>${_fmtFileType(f.file_type)}</td>
+      <td style="font-size:0.78rem;color:var(--muted)">${_fmtSize(f.file_size)}</td>
+      <td>${labels || '<span style="color:var(--muted)">-</span>'}</td>
+      <td style="text-align:right;font-variant-numeric:tabular-nums">${f.chunk_count ?? 0}</td>
+      <td style="font-size:0.76rem;color:var(--muted);white-space:nowrap">${_fmtFileDate(f.created_at)}</td>
+      <td style="text-align:right"><button class="btn btn-sm" style="border:1px solid rgba(248,81,73,0.4);color:var(--red);background:transparent" onclick="removeFile(${f.id})">🗑</button></td>
+    </tr>`;
+  }).join('');
+  updateFileBulkBar();
+}
+
+function toggleFileSelectAll(checked) {
+  _filesData.forEach(f => checked ? _selectedFiles.add(f.id) : _selectedFiles.delete(f.id));
+  _renderFileTable();
+}
+
+function toggleFileSelect(id, checked) {
+  checked ? _selectedFiles.add(id) : _selectedFiles.delete(id);
+  updateFileBulkBar();
+}
+
+function clearFileSelection() {
+  _selectedFiles.clear();
+  _renderFileTable();
+}
+
+function updateFileBulkBar() {
+  const bar = document.getElementById('fileBulkBar');
+  const count = document.getElementById('fileBulkCount');
+  if (_selectedFiles.size > 0) {
+    bar.classList.remove('hidden');
+    count.textContent = _selectedFiles.size + ' selected';
+  } else {
+    bar.classList.add('hidden');
+  }
+}
+
+async function uploadFile() {
+  const input = document.getElementById('fileInput');
+  const labelsEl = document.getElementById('fileLabels');
+  const btn = document.getElementById('uploadBtn');
+  const msg = document.getElementById('fileMsg');
+  if (!input.files || !input.files[0]) { _flashMsg(fileMsg, 'Please select a file.', 'warn'); return; }
+  const labelsVal = labelsEl.value.trim();
+  if (!labelsVal) { labelsEl.classList.add('field-error'); _flashMsg(fileMsg, 'At least one label is required.', 'warn'); return; }
+  labelsEl.classList.remove('field-error');
+  msg.classList.add('hidden');
+  const origText = btn.innerHTML;
+  btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Uploading…';
+  try {
+    const form = new FormData();
+    form.append('file', input.files[0]);
+    form.append('labels', labelsVal);
+    const r = await fetch('/files', { method: 'POST', body: form });
+    const d = await r.json();
+    if (!r.ok) { _flashMsg(fileMsg, d.detail || 'Upload failed', 'err'); return; }
+    const chunkInfo = d.status === 'pending' ? 'processing...' : `${d.chunk_count} chunks`;
+    _flashMsg(fileMsg, `Uploaded "${d.filename}" — ${chunkInfo}`, 'ok');
+    input.value = ''; labelsEl.value = '';
+    await loadSummary(); await loadFiles();
+  } catch(e) { _flashMsg(fileMsg, 'Network error: ' + e.message, 'err'); }
+  finally { btn.disabled = false; btn.innerHTML = origText; }
+}
+
+async function removeFile(id) {
+  if (!confirm('Delete this file and all its vectors?')) return;
+  try {
+    const r = await fetch(`/files/${id}`, { method: 'DELETE' });
+    if (!r.ok) { const d = await r.json(); alert(d.detail || 'Delete failed'); return; }
+    _selectedFiles.delete(id);
+    await loadSummary(); await loadFiles();
+  } catch(e) { alert('Network error: ' + e.message); }
+}
+
+async function bulkDeleteFiles() {
+  if (_selectedFiles.size === 0) return;
+  if (!confirm(`Delete ${_selectedFiles.size} file(s) and all vectors?`)) return;
+  const ids = Array.from(_selectedFiles);
+  try {
+    const r = await fetch('/files/bulk-delete', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ids}) });
+    if (!r.ok) { const d = await r.json(); alert(d.detail || 'Bulk delete failed'); return; }
+    _selectedFiles.clear();
+    await loadSummary(); await loadFiles();
+  } catch(e) { alert('Network error: ' + e.message); }
+}
+
+function _flashMsg(el, text, kind) {
+  if (typeof el === 'string') el = document.getElementById(el);
+  if (!el) return;
+  el.textContent = text; el.classList.remove('hidden');
+  el.style.color = kind === 'err' ? 'var(--red)' : kind === 'warn' ? 'var(--amber)' : 'var(--green)';
+  setTimeout(() => el.classList.add('hidden'), 5000);
 }
 
 // ─── URLs ────────────────────────────────────────────────────────

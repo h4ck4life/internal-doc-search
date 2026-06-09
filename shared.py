@@ -62,6 +62,59 @@ _ingest_thread: Optional[threading.Thread] = None
 _ingest_lock = threading.Lock()
 _ingest_stop_event = threading.Event()
 
+# Track active file-processing threads so we can join them at shutdown.
+# Used by both api.py (REST upload) and mcp_server.py (MCP upload).
+_file_threads: set = set()
+_file_threads_lock = threading.Lock()
+
+
+def track_file_thread(t: threading.Thread) -> None:
+    """Register a file-processing thread for graceful shutdown join."""
+    with _file_threads_lock:
+        _file_threads.add(t)
+
+
+def untrack_file_thread(t: threading.Thread) -> None:
+    """Remove a completed file-processing thread from tracking."""
+    with _file_threads_lock:
+        _file_threads.discard(t)
+
+
+def _run_file_processing(content: bytes, filename: str, labels: list[str], file_id: int) -> None:
+    """Process an uploaded file in a background thread (shared by REST + MCP).
+
+    Calls file_processor.process_file(), handles errors, updates SQLite
+    status, and untracks the thread on completion.
+    """
+    try:
+        from file_processor import process_file
+
+        result = process_file(content, filename, labels, file_id)
+        if result.get("status") == "failed":
+            logger.error(
+                "File processing failed for %s: %s", filename, result.get("error"),
+            )
+    except Exception:
+        import traceback
+        from store import update_file_status
+
+        logger.error(
+            "Unhandled error processing file %s: %s",
+            filename, traceback.format_exc(),
+        )
+        update_file_status(file_id, "failed",
+                           error_message=traceback.format_exc())
+    finally:
+        untrack_file_thread(threading.current_thread())
+
+
+def join_file_threads(timeout: float = 30) -> None:
+    """Join all active file-processing threads (called at shutdown)."""
+    with _file_threads_lock:
+        active = list(_file_threads)
+    for ft in active:
+        ft.join(timeout=timeout)
+
 
 # ─── Thread-safe accessors ─────────────────────────────────────────
 

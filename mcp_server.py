@@ -12,6 +12,7 @@ Tools:
 Run: `fastmcp run mcp_server.py` (standalone) or mounted in FastAPI via `mcp.http_app()`
 """
 
+import os
 import re
 import threading as _th
 from typing import Optional
@@ -50,8 +51,16 @@ def _ensure_imports():
         return
     global AsyncQdrantClient, models
     global init_db, list_urls, add_url, get_config, validate_url_input
+    global _store_list_files, _store_delete_file, _store_get_file, _store_add_file
     from qdrant_client import AsyncQdrantClient, models  # noqa: F811
-    from store import init_db, list_urls, add_url, get_config, validate_url_input  # noqa: F811
+    from store import (  # noqa: F811
+        init_db, list_urls, add_url, get_config, validate_url_input,
+    )
+    import store as _store
+    _store_list_files = _store.list_files
+    _store_delete_file = _store.delete_file
+    _store_get_file = _store.get_file
+    _store_add_file = _store.add_file
     _imports_loaded = True
 
 
@@ -771,3 +780,186 @@ async def trigger_crawl(mode: str = "all") -> dict:
         "total_urls": len(pending),
         "message": f"Crawling {len(pending)} URL(s) in background thread (mode={mode})",
     }
+
+
+# ─── File Tools ────────────────────────────────────────────────────
+
+
+@mcp.tool()
+async def upload_file(
+    file_path: str,
+    labels: list[str],
+) -> dict:
+    """Upload and index a local document file for semantic search.
+
+    Reads a file from the local filesystem, extracts text, chunks it,
+    generates embeddings, and stores vectors in Qdrant alongside URL content.
+    Supported formats: PDF, DOCX, TXT, MD, HTML, CSV, JSON.
+
+    Processing runs in a background thread — this returns immediately with
+    status='pending'. The file becomes searchable once the thread finishes.
+
+    Args:
+        file_path: Absolute or relative path to the file on disk.
+        labels: List of topic labels (e.g., ["Auth", "API"]). At least one
+            label is required. Chunks are replicated once per label so
+            any single label filter returns the file's content.
+
+    Returns:
+        The file record with id, filename, file_type, file_size, labels,
+        and status='pending'. Use list_files() to check when it completes.
+    """
+    _ensure_imports()
+    import threading
+
+    if not labels:
+        return {"error": "At least one label is required."}
+
+    # Read file from disk
+    try:
+        with open(file_path, "rb") as f:
+            content = f.read()
+    except FileNotFoundError:
+        return {"error": f"File not found: {file_path}"}
+    except PermissionError:
+        return {"error": f"Permission denied: {file_path}"}
+    except Exception as e:
+        return {"error": f"Failed to read file: {e}"}
+
+    if not content:
+        return {"error": "File is empty."}
+
+    # Size limit: 50 MB (matches REST API)
+    MAX_FILE_SIZE = 50 * 1024 * 1024
+    if len(content) > MAX_FILE_SIZE:
+        return {
+            "error": (
+                f"File too large ({len(content) // (1024 * 1024)} MB). "
+                f"Maximum size is {MAX_FILE_SIZE // (1024 * 1024)} MB."
+            )
+        }
+
+    filename = os.path.basename(file_path)
+    from file_processor import detect_file_type
+
+    detected = detect_file_type(filename)
+    if detected is None:
+        from file_processor import EXTENSION_MAP
+        supported = ", ".join(sorted(set(t for t, _ in EXTENSION_MAP.values())))
+        return {
+            "error": (
+                f"Unsupported file type "
+                f"'{os.path.splitext(filename)[1]}'. Accepted: {supported}"
+            )
+        }
+
+    file_type, _ = detected
+    file_size = len(content)
+
+    # Insert record with status='pending' — processing runs in background
+    record = _store_add_file(filename, file_type, file_size, labels)
+
+    # Process in background thread to avoid blocking the async event loop.
+    # Uses shared._run_file_processing (same as REST API POST /files).
+    from shared import _run_file_processing, track_file_thread
+
+    t = threading.Thread(
+        target=_run_file_processing,
+        args=(content, filename, labels, record["id"]),
+        daemon=True,
+    )
+    track_file_thread(t)
+    t.start()
+
+    return record
+
+
+@mcp.tool()
+async def delete_file(file_id: int) -> dict:
+    """Delete an uploaded file and all its vectors from the search index.
+
+    Args:
+        file_id: The numeric ID of the file to delete. Use list_files() to
+            discover file IDs.
+
+    Returns:
+        Deletion status with filename and number of chunks removed.
+    """
+    _ensure_imports()
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+    # Verify file exists before attempting Qdrant cleanup
+    existing = _store_get_file(file_id)
+    if existing is None:
+        return {
+            "error": (
+                f"File with id={file_id} not found. "
+                f"Use list_files() to see available files."
+            )
+        }
+
+    # Clean up Qdrant vectors BEFORE deleting the SQLite record
+    client = AsyncQdrantClient(url=QDRANT_URL, check_compatibility=False)  # noqa: F811
+    try:
+        await client.delete(
+            collection_name=COLLECTION_NAME,
+            points_selector=models.FilterSelector(
+                filter=models.Filter(
+                    must=[
+                        models.FieldCondition(
+                            key="file_id",
+                            match=models.MatchValue(value=file_id),
+                        )
+                    ]
+                )
+            ),
+        )
+    except Exception as e:
+        logger.error("Qdrant delete failed for file_id=%d: %s", file_id, e)
+        return {
+            "error": (
+                f"Failed to clean up search vectors: {e}. "
+                f"The file was not deleted — retry later."
+            )
+        }
+    finally:
+        await client.close()
+
+    # Qdrant cleanup succeeded — now safe to delete from SQLite
+    record = _store_delete_file(file_id)
+    if record is None:
+        return {"error": f"File with id={file_id} disappeared during deletion"}
+
+    return {
+        "deleted": True,
+        "file_id": file_id,
+        "filename": record["filename"],
+        "chunks_removed": record.get("chunk_count", 0),
+    }
+
+
+@mcp.tool()
+async def list_files(limit: int = 50, offset: int = 0) -> dict:
+    """List uploaded files with metadata. Use to discover file IDs before
+    calling delete_file(), or to see what documents have been indexed.
+
+    Args:
+        limit: Maximum files to return (default 50, max 100).
+        offset: Pagination offset (default 0).
+
+    Returns:
+        Dict with "files" list and "total" count. Each file has id, filename,
+        file_type, file_size, labels, chunk_count, status, created_at.
+    """
+    _ensure_imports()
+
+    limit = max(1, min(limit, 100))
+    files = _store_list_files(limit=limit, offset=offset)
+
+    from store import get_file_count as _store_get_file_count
+
+    total = _store_get_file_count()
+
+    return {"files": files, "total": total}

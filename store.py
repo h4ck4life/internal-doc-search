@@ -58,6 +58,25 @@ def init_db() -> None:
                 value TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS files (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                filename TEXT NOT NULL,
+                file_type TEXT NOT NULL,
+                file_size INTEGER DEFAULT 0,
+                status TEXT DEFAULT 'pending',
+                chunk_count INTEGER DEFAULT 0,
+                error_message TEXT,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS file_labels (
+                file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+                label TEXT NOT NULL,
+                PRIMARY KEY (file_id, label)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_file_labels_label ON file_labels(label);
         """)
         conn.commit()
 
@@ -382,11 +401,38 @@ def update_url(
         conn.close()
 
 
+def get_url_children(url_id: int) -> list[str]:
+    """Return URLs that would be affected by deleting url_id (read-only).
+
+    Returns (parent_url, [child_urls]) so callers can clean Qdrant
+    vectors before committing the SQLite delete. Empty list if not found.
+    """
+    conn = _get_conn()
+    try:
+        existing = conn.execute(
+            "SELECT url FROM urls WHERE id = ?", (url_id,)
+        ).fetchone()
+        if existing is None:
+            return []
+        affected = [existing["url"]]
+        children = conn.execute(
+            "SELECT url FROM urls WHERE parent_url_id = ?", (url_id,)
+        ).fetchall()
+        for child in children:
+            affected.append(child["url"])
+        return affected
+    finally:
+        conn.close()
+
+
 def delete_url(url_id: int) -> list[str]:
     """Delete a URL and all its discovered children (cascade).
 
     Returns list of affected URLs for Qdrant vector cleanup.
     Empty list if url_id not found.
+
+    Prefer get_url_children() + Qdrant cleanup + delete_url() for
+    the Qdrant-first delete pattern used by the API endpoint.
     """
     conn = _get_conn()
     try:
@@ -433,11 +479,163 @@ def update_url_status(
         conn.close()
 
 
+def resolve_chunk_config() -> tuple[int, int]:
+    """Return (max_tokens, overlap_tokens) from config with deprecated-char-key fallback.
+
+    New token-aware keys are preferred. If not set or &lt;= 0, falls back to
+    the deprecated character-based keys with a // 4 ratio. Shared by both
+    ingest.py (URL crawl) and file_processor.py (file upload).
+    """
+    max_tokens = int(get_config("chunk_max_tokens", "0") or "0")
+    overlap_tokens = int(get_config("chunk_overlap_tokens", "0") or "0")
+    if max_tokens <= 0:
+        max_tokens = max(50, int(get_config("chunk_max_chars", "2000")) // 4)
+    if overlap_tokens <= 0:
+        overlap_tokens = max(10, int(get_config("chunk_overlap", "100")) // 4)
+    return max_tokens, overlap_tokens
+
+
 def checkpoint_wal() -> None:
     """Truncate the WAL file after bulk writes to prevent unbounded growth."""
     conn = _get_conn()
     try:
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    finally:
+        conn.close()
+
+
+# ─── File CRUD ──────────────────────────────────────────────────────
+
+
+def _set_file_labels(conn: sqlite3.Connection, file_id: int, labels: List[str]) -> None:
+    """Replace the label set for a file. Empty list clears all."""
+    conn.execute("DELETE FROM file_labels WHERE file_id = ?", (file_id,))
+    for lbl in labels:
+        conn.execute(
+            "INSERT OR IGNORE INTO file_labels (file_id, label) VALUES (?, ?)",
+            (file_id, lbl),
+        )
+
+
+def _get_file_labels(conn: sqlite3.Connection, file_id: int) -> List[str]:
+    rows = conn.execute(
+        "SELECT label, rowid FROM file_labels WHERE file_id = ? ORDER BY rowid",
+        (file_id,),
+    ).fetchall()
+    return [r["label"] for r in rows]
+
+
+def add_file(filename: str, file_type: str, file_size: int, labels: List[str]) -> dict:
+    """Insert a new file record. Returns the created row as dict with a 'labels' list.
+
+    Args:
+        filename: Original filename (for display and type detection).
+        file_type: Detected file type (pdf, docx, txt, md, html, csv, json).
+        file_size: File size in bytes.
+        labels: List of topic labels. At least one is required.
+    """
+    merged = _normalize_labels(labels)
+    conn = _get_conn()
+    try:
+        cur = conn.execute(
+            "INSERT INTO files (filename, file_type, file_size, status, created_at) "
+            "VALUES (?, ?, ?, 'pending', ?)",
+            (filename, file_type, file_size, _now_iso()),
+        )
+        file_id = cur.lastrowid
+        _set_file_labels(conn, file_id, merged)
+        conn.commit()
+        row = conn.execute("SELECT * FROM files WHERE id = ?", (file_id,)).fetchone()
+        result = dict(row)
+        result["labels"] = _get_file_labels(conn, file_id)
+        return result
+    finally:
+        conn.close()
+
+
+def update_file_status(
+    file_id: int,
+    status: str = "completed",
+    chunk_count: int = 0,
+    error_message: Optional[str] = None,
+) -> None:
+    """Update processing status for a file after ingestion."""
+    conn = _get_conn()
+    try:
+        conn.execute(
+            "UPDATE files SET status=?, chunk_count=?, error_message=? WHERE id=?",
+            (status, chunk_count, error_message, file_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def list_files(limit: int = 50, offset: int = 0) -> List[dict]:
+    """List uploaded files with labels, most recent first."""
+    conn = _get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM files ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            (limit, offset),
+        ).fetchall()
+        out: List[dict] = []
+        for r in rows:
+            d = dict(r)
+            d["labels"] = _get_file_labels(conn, d["id"])
+            out.append(d)
+        return out
+    finally:
+        conn.close()
+
+
+def delete_file(file_id: int) -> Optional[dict]:
+    """Delete a file record from SQLite. Returns the row dict for Qdrant cleanup,
+    or None if not found. file_labels rows cascade automatically."""
+    conn = _get_conn()
+    try:
+        existing = conn.execute("SELECT * FROM files WHERE id = ?", (file_id,)).fetchone()
+        if existing is None:
+            return None
+        result = dict(existing)
+        result["labels"] = _get_file_labels(conn, file_id)
+        conn.execute("DELETE FROM files WHERE id = ?", (file_id,))
+        conn.commit()
+        return result
+    finally:
+        conn.close()
+
+
+def get_file(file_id: int) -> Optional[dict]:
+    """Get a single file by ID with its labels."""
+    conn = _get_conn()
+    try:
+        row = conn.execute("SELECT * FROM files WHERE id = ?", (file_id,)).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        result["labels"] = _get_file_labels(conn, file_id)
+        return result
+    finally:
+        conn.close()
+
+
+def get_file_count() -> int:
+    """Total number of uploaded files."""
+    conn = _get_conn()
+    try:
+        row = conn.execute("SELECT COUNT(*) as cnt FROM files").fetchone()
+        return row["cnt"]
+    finally:
+        conn.close()
+
+
+def get_file_chunk_count() -> int:
+    """Total chunks across all uploaded files."""
+    conn = _get_conn()
+    try:
+        row = conn.execute("SELECT COALESCE(SUM(chunk_count), 0) as cnt FROM files").fetchone()
+        return row["cnt"]
     finally:
         conn.close()
 

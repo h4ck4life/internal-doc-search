@@ -314,6 +314,31 @@ def test_source_diversity_cap_one():
     assert capped[1]["url"] == "b.com"
 
 
+def test_source_diversity_skips_file_urls():
+    """file:// chunks are not capped — multi-page docs need all chunks."""
+    results = [
+        {"url": "file://report.pdf", "content": "c1", "cross_encoder_score": 0.9},
+        {"url": "file://report.pdf", "content": "c2", "cross_encoder_score": 0.8},
+        {"url": "file://report.pdf", "content": "c3", "cross_encoder_score": 0.7},
+        {"url": "file://notes.txt", "content": "n1", "cross_encoder_score": 0.6},
+    ]
+    capped = apply_source_diversity(results, cap=2)
+    assert len(capped) == 4  # All file:// chunks pass through
+
+
+def test_source_diversity_file_and_http_mixed():
+    """HTTP URLs capped normally, file:// URLs pass through."""
+    results = [
+        {"url": "a.com", "content": "a1", "cross_encoder_score": 0.9},
+        {"url": "a.com", "content": "a2", "cross_encoder_score": 0.8},
+        {"url": "a.com", "content": "a3", "cross_encoder_score": 0.7},
+        {"url": "file://doc.pdf", "content": "d1", "cross_encoder_score": 0.6},
+        {"url": "file://doc.pdf", "content": "d2", "cross_encoder_score": 0.5},
+    ]
+    capped = apply_source_diversity(results, cap=1)
+    assert len(capped) == 3  # a.com:1 + file://doc.pdf:2
+
+
 # ─── generate_low_relevance_hint ────────────────────────────────────
 
 
@@ -343,3 +368,120 @@ def test_hint_custom_threshold():
 
     hint = generate_low_relevance_hint(0.35, "q", ["X"], threshold=0.3)
     assert hint is None  # 0.35 >= 0.3
+
+
+# ─── RESULT_PAYLOAD_MAP — new file fields ──────────────────────────
+
+from search_utils import RESULT_PAYLOAD_MAP, _build_result
+
+
+class _FakePoint:
+    """Minimal Qdrant ScoredPoint stand-in for _build_result tests."""
+    def __init__(self, score=0.85, **payload):
+        self.score = score
+        self.payload = payload
+
+
+def test_payload_map_includes_source_type():
+    """source_type field is present with default 'url'."""
+    assert "source_type" in {v[0] for v in RESULT_PAYLOAD_MAP.values()}
+
+
+def test_payload_map_includes_file_id():
+    """file_id field is present with default None."""
+    assert "file_id" in {v[0] for v in RESULT_PAYLOAD_MAP.values()}
+
+
+def test_payload_map_includes_filename():
+    """filename field is present with default ''."""
+    assert "filename" in {v[0] for v in RESULT_PAYLOAD_MAP.values()}
+
+
+def test_payload_map_includes_file_type():
+    """file_type field is present with default ''."""
+    assert "file_type" in {v[0] for v in RESULT_PAYLOAD_MAP.values()}
+
+
+def test_build_result_url_chunk_defaults():
+    """URL chunks without new fields get safe defaults."""
+    point = _FakePoint(
+        score=0.9,
+        url="https://example.com",
+        label="Docs",
+        content="hello",
+        chunk_index=0,
+        page_index=0,
+        # No source_type, file_id, filename, file_type in payload
+    )
+    result = _build_result(point)
+    assert result["source_type"] == "url"
+    assert result["file_id"] is None
+    assert result["filename"] == ""
+    assert result["file_type"] == ""
+
+
+def test_build_result_file_chunk_values():
+    """File chunks with new fields return correct values."""
+    point = _FakePoint(
+        score=0.88,
+        url="file://report.pdf",
+        label="Docs",
+        content="chunk text",
+        chunk_index=3,
+        page_index=0,
+        source_type="file",
+        file_id=42,
+        filename="report.pdf",
+        file_type="pdf",
+    )
+    result = _build_result(point)
+    assert result["source_type"] == "file"
+    assert result["file_id"] == 42
+    assert result["filename"] == "report.pdf"
+    assert result["file_type"] == "pdf"
+
+
+def test_normalize_results_includes_new_fields():
+    """normalize_results picks up new payload fields."""
+    from search_utils import normalize_results
+
+    point = _FakePoint(
+        score=0.8,
+        url="file://doc.txt",
+        label="Docs",
+        content="text",
+        chunk_index=0,
+        page_index=0,
+        source_type="file",
+        file_id=1,
+        filename="doc.txt",
+        file_type="txt",
+    )
+    results = normalize_results([point], [1.5], limit=10)
+    assert len(results) == 1
+    assert results[0]["source_type"] == "file"
+    assert results[0]["file_id"] == 1
+    assert results[0]["filename"] == "doc.txt"
+
+
+def test_apply_label_boost_includes_new_fields():
+    """apply_label_boost picks up new payload fields."""
+    from search_utils import apply_label_boost
+
+    point = _FakePoint(
+        score=0.8,
+        url="file://guide.pdf",
+        label="Auth",
+        content="guide text",
+        chunk_index=1,
+        page_index=0,
+        source_type="file",
+        file_id=7,
+        filename="guide.pdf",
+        file_type="pdf",
+    )
+    results = apply_label_boost([point], [1.5], positive=["Auth"])
+    assert len(results) == 1
+    assert results[0]["source_type"] == "file"
+    assert results[0]["file_id"] == 7
+    assert results[0]["filename"] == "guide.pdf"

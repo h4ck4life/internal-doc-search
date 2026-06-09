@@ -32,6 +32,10 @@ RESULT_PAYLOAD_MAP: dict[str, tuple[str, Any]] = {
     "section_heading":("section_heading",""),
     "content_type":   ("content_type",   "unknown"),
     "total_chunks":   ("total_chunks",   0),
+    "source_type":    ("source_type",    "url"),
+    "file_id":        ("file_id",        None),
+    "filename":       ("filename",       ""),
+    "file_type":      ("file_type",      ""),
 }
 
 
@@ -261,6 +265,11 @@ def apply_source_diversity(results: list[dict], cap: int) -> list[dict]:
     output: list[dict] = []
     for r in results:
         url = r.get("url", "") or ""
+        # File chunks share a virtual URL (file://filename) — don't cap
+        # them because multi-page documents need all chunks visible.
+        if url.startswith("file://"):
+            output.append(r)
+            continue
         if url_counts.get(url, 0) < cap:
             url_counts[url] = url_counts.get(url, 0) + 1
             output.append(r)

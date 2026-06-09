@@ -5,7 +5,7 @@ import threading
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from qdrant_client import AsyncQdrantClient, models
@@ -36,6 +36,13 @@ from store import (
     get_config,
     set_config,
     validate_url_input,
+    get_url_children,
+    add_file,
+    list_files,
+    delete_file,
+    get_file,
+    get_file_count,
+    get_file_chunk_count,
 )
 
 from search_utils import (
@@ -70,8 +77,40 @@ async def app_lifespan(app: FastAPI):
             )
             set_ingest_thread(None)
 
+    # Join active file-processing threads so partial vectors are not
+    # left behind when the server restarts.
+    from shared import join_file_threads
+    join_file_threads(timeout=30)
+
 
 from mcp_server import mcp as mcp_app
+
+# FastMCP 3.x: http_app(path='/') means the sub-app's route is at "/".
+
+
+def _process_file_in_thread(content: bytes, filename: str, labels: list[str], file_id: int):
+    """Process uploaded file in a background thread.
+
+    Delegates to shared._run_file_processing which handles the full
+    process_file → error handling → status update → untrack lifecycle.
+    """
+    from shared import _run_file_processing
+    _run_file_processing(content, filename, labels, file_id)
+
+
+def _spawn_file_thread(content: bytes, filename: str, labels: list[str], file_id: int):
+    """Spawn a tracked background thread for file processing."""
+    from shared import track_file_thread
+
+    t = threading.Thread(
+        target=_process_file_in_thread,
+        args=(content, filename, labels, file_id),
+        daemon=True,
+    )
+    track_file_thread(t)
+    t.start()
+    return t
+
 
 # FastMCP 3.x: http_app(path='/') means the sub-app's route is at "/".
 # We mount at "/mcp" so Starlette strips that prefix; the residual ""
@@ -210,7 +249,10 @@ async def search(request: Request, q: str = Query(...), limit: int = Query(defau
             conn = _get_conn()
             try:
                 label_rows = conn.execute(
-                    "SELECT label FROM url_labels GROUP BY label ORDER BY label"
+                    "SELECT label FROM url_labels "
+                    "UNION "
+                    "SELECT label FROM file_labels "
+                    "ORDER BY label"
                 ).fetchall()
                 available = [r["label"] for r in label_rows]
             finally:
@@ -314,11 +356,16 @@ async def docs_summary():
     if crawled_times:
         last_crawl = max(crawled_times)
 
+    file_count = get_file_count()
+    file_chunks = get_file_chunk_count()
+
     return {
         "urls_configured": urls_configured,
         "urls_crawled": urls_crawled,
         "total_chunks": total_chunks,
         "last_crawl": last_crawl,
+        "files_uploaded": file_count,
+        "file_chunks": file_chunks,
     }
 
 
@@ -330,19 +377,31 @@ async def get_urls():
 
 @app.get("/labels")
 async def get_labels():
-    """Return distinct labels with URL counts for chip-based search UI.
+    """Return distinct labels with source counts for chip-based search UI.
 
-    Reads from the url_labels table (source of truth for multi-label URLs).
-    Each URL with labels=['Auth', 'API'] contributes to both counts.
+    Merges labels from both crawled URLs (url_labels) and uploaded
+    files (file_labels) so the UI autocomplete covers all content.
     """
     from store import _get_conn
     conn = _get_conn()
     try:
         rows = conn.execute(
-            "SELECT label, COUNT(DISTINCT url_id) AS urls "
-            "FROM url_labels GROUP BY label ORDER BY label"
+            "SELECT label, COUNT(DISTINCT url_id) AS urls, 0 AS files "
+            "FROM url_labels GROUP BY label "
+            "UNION ALL "
+            "SELECT label, 0 AS urls, COUNT(DISTINCT file_id) AS files "
+            "FROM file_labels GROUP BY label "
+            "ORDER BY label"
         ).fetchall()
-        return [{"label": r["label"], "urls": r["urls"]} for r in rows]
+        # Merge duplicates from UNION (a label may appear in both tables)
+        merged: dict[str, dict] = {}
+        for r in rows:
+            lbl = r["label"]
+            if lbl not in merged:
+                merged[lbl] = {"label": lbl, "urls": 0, "files": 0}
+            merged[lbl]["urls"] += r["urls"]
+            merged[lbl]["files"] += r["files"]
+        return sorted(merged.values(), key=lambda x: x["label"])
     finally:
         conn.close()
 
@@ -400,12 +459,14 @@ async def update_url_endpoint(url_id: int, body: URLUpdate):
 @app.delete("/urls/{url_id}")
 async def delete_url_endpoint(url_id: int):
     """Delete a crawl URL, its children, and all vectors from Qdrant."""
-    # Cascade delete: collects all affected URLs (parent + children)
-    affected_urls = delete_url(url_id)
+    # Use store.get_url_children() for the authoritative affected-URLs
+    # list — avoids reimplementing child resolution and eliminates the
+    # race window between list_urls() snapshot and delete_url().
+    affected_urls = get_url_children(url_id)
     if not affected_urls:
         raise HTTPException(status_code=404, detail="URL not found")
 
-    # Clean up vectors for ALL affected URLs from Qdrant
+    # Clean up Qdrant vectors FIRST — before any SQLite mutation
     client = AsyncQdrantClient(url=QDRANT_URL, check_compatibility=False)
     try:
         for url in affected_urls:
@@ -420,10 +481,19 @@ async def delete_url_endpoint(url_id: int):
                     )
                 ),
             )
-    except Exception:
-        pass  # Collection might not exist yet
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error("Qdrant delete failed for url_id=%d: %s", url_id, e)
+        raise HTTPException(
+            status_code=503,
+            detail=f"Failed to clean up search vectors: {e}. The URL was not deleted — retry later.",
+        )
     finally:
         await client.close()
+
+    # Qdrant cleanup succeeded — now safe to delete from SQLite
+    delete_url(url_id)
 
     return {"deleted": True, "affected_urls": len(affected_urls)}
 
@@ -522,6 +592,181 @@ async def update_config_endpoint(body: dict):
     if not updated:
         raise HTTPException(status_code=400, detail="No valid config keys provided")
     return {"status": "updated", "config": updated}
+
+
+# ─── File upload / management ──────────────────────────────────────
+
+
+@app.post("/files", status_code=201)
+async def upload_file_endpoint(
+    file: UploadFile = File(...),
+    labels: str = Form(default=""),
+):
+    """Upload a document file for indexing. Accepts: PDF, DOCX, TXT, MD, HTML, CSV, JSON.
+
+    Labels are comma-separated (e.g. "Auth, API"). At least one label is required.
+    Processing runs in a background thread — the file appears in /files immediately
+    but chunks may take a few seconds to appear in search results.
+    """
+    from file_processor import detect_file_type
+
+    filename = file.filename or "unknown"
+
+    # Validate file type (store result to avoid re-detecting below)
+    detected = detect_file_type(filename)
+    if detected is None:
+        from file_processor import EXTENSION_MAP
+        supported = ", ".join(sorted(set(t for t, _ in EXTENSION_MAP.values())))
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type '{os.path.splitext(filename)[1]}'. Accepted: {supported}",
+        )
+    file_type, _extractor = detected
+
+    # Validate labels
+    label_list = [lbl.strip() for lbl in labels.split(",") if lbl.strip()]
+    if not label_list:
+        raise HTTPException(status_code=400, detail="At least one label is required.")
+
+    # Read file content
+    try:
+        content = await file.read()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to read file: {e}")
+
+    if not content or len(content) == 0:
+        raise HTTPException(status_code=400, detail="File is empty.")
+
+    # Size limit: 50 MB
+    MAX_FILE_SIZE = 50 * 1024 * 1024
+    if len(content) > MAX_FILE_SIZE:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large. Maximum size is {MAX_FILE_SIZE // (1024 * 1024)} MB.",
+        )
+
+    # Insert SQLite record (file_type from the earlier detection)
+    record = add_file(filename, file_type, len(content), label_list)
+
+    # Process in tracked background thread (joined at shutdown)
+    _spawn_file_thread(content, filename, label_list, record["id"])
+
+    return record
+
+
+@app.get("/files")
+async def get_files(
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+):
+    """List all uploaded files with their labels, most recent first."""
+    return list_files(limit=limit, offset=offset)
+
+
+@app.delete("/files/{file_id}")
+async def delete_file_endpoint(file_id: int):
+    """Delete an uploaded file and all its vectors from Qdrant."""
+    # Verify file exists before attempting Qdrant cleanup
+    from store import get_file as _get_file
+
+    existing = _get_file(file_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    # Clean up vectors from Qdrant BEFORE deleting the SQLite record.
+    # If Qdrant is unreachable, the file row stays intact so the caller
+    # can retry and no vectors are orphaned.
+    client = AsyncQdrantClient(url=QDRANT_URL, check_compatibility=False)
+    try:
+        await client.delete(
+            collection_name=COLLECTION_NAME,
+            points_selector=models.FilterSelector(
+                filter=models.Filter(
+                    must=[
+                        models.FieldCondition(
+                            key="file_id",
+                            match=models.MatchValue(value=file_id),
+                        )
+                    ]
+                )
+            ),
+        )
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error("Qdrant delete failed for file_id=%d: %s", file_id, e)
+        raise HTTPException(
+            status_code=503,
+            detail=f"Failed to clean up search vectors: {e}. The file was not deleted — retry later.",
+        )
+    finally:
+        await client.close()
+
+    # Qdrant cleanup succeeded — now safe to delete from SQLite
+    record = delete_file(file_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    return {
+        "deleted": True,
+        "file_id": file_id,
+        "filename": record["filename"],
+        "chunks_removed": record.get("chunk_count", 0),
+    }
+
+
+@app.post("/files/bulk-delete")
+async def bulk_delete_files_endpoint(body: dict):
+    """Bulk delete multiple files. Body: {"ids": [1, 2, 3]}"""
+    ids = body.get("ids", [])
+    if not isinstance(ids, list) or not ids:
+        raise HTTPException(
+            status_code=400, detail="ids must be a non-empty list of integers"
+        )
+
+    import logging
+    logger = logging.getLogger(__name__)
+
+    # Open one Qdrant client for all deletions
+    client = AsyncQdrantClient(url=QDRANT_URL, check_compatibility=False)
+    results = {"deleted": 0, "not_found": 0, "errors": 0}
+    try:
+        for file_id in ids:
+            try:
+                # Verify file exists and capture its info
+                existing = get_file(file_id)
+                if existing is None:
+                    results["not_found"] += 1
+                    continue
+
+                # Delete vectors from Qdrant first
+                try:
+                    await client.delete(
+                        collection_name=COLLECTION_NAME,
+                        points_selector=models.FilterSelector(
+                            filter=models.Filter(
+                                must=[
+                                    models.FieldCondition(
+                                        key="file_id",
+                                        match=models.MatchValue(value=file_id),
+                                    )
+                                ]
+                            )
+                        ),
+                    )
+                except Exception as e:
+                    logger.error("Qdrant delete failed for file_id=%d: %s", file_id, e)
+                    results["errors"] += 1
+                    continue
+
+                # Qdrant cleanup succeeded — safe to delete from SQLite
+                delete_file(file_id)
+                results["deleted"] += 1
+            except Exception:
+                results["errors"] += 1
+    finally:
+        await client.close()
+    return results
 
 
 # MCP mount at /mcp with path='/' in the sub-app. Starlette strips the
