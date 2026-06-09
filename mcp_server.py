@@ -807,7 +807,7 @@ async def upload_file(
 
     Reads a file from the local filesystem, extracts text, chunks it,
     generates embeddings, and stores vectors in Qdrant alongside URL content.
-    Supported formats: PDF, DOCX, TXT, MD, HTML, CSV, JSON.
+    Supported formats: PDF, DOCX, EPUB, TXT, MD, HTML, CSV, JSON.
 
     Processing runs in a background thread — this returns immediately with
     status='pending'. The file becomes searchable once the thread finishes.
@@ -1006,7 +1006,7 @@ async def watch_folder(
     """Watch a local folder recursively and automatically ingest allowed files.
 
     The watcher monitors the folder and all subfolders. New or modified PDF,
-    DOCX, TXT, MD, HTML, CSV, and JSON files are uploaded and ingested
+    DOCX, EPUB, TXT, MD, HTML, CSV, and JSON files are uploaded and ingested
     automatically. The watcher runs outside the main API thread in a separate
     Python process supervised by the API service.
 

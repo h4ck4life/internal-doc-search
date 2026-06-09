@@ -631,7 +631,7 @@ def add_file(
 
     Args:
         filename: Original filename (for display and type detection).
-        file_type: Detected file type (pdf, docx, txt, md, html, csv, json).
+        file_type: Detected file type (pdf, docx, epub, txt, md, html, csv, json).
         file_size: File size in bytes.
         labels: List of topic labels. At least one is required.
         content_sha256: Optional SHA-256 digest of the raw file bytes.

@@ -31,6 +31,10 @@ def test_detect_file_type_docx():
     assert detect_file_type("report.docx") == ("docx", EXTENSION_MAP[".docx"][1])
 
 
+def test_detect_file_type_epub():
+    assert detect_file_type("book.epub") == ("epub", EXTENSION_MAP[".epub"][1])
+
+
 def test_detect_file_type_txt():
     assert detect_file_type("notes.txt") == ("txt", EXTENSION_MAP[".txt"][1])
 
@@ -167,6 +171,39 @@ def test_extract_html_mocked(monkeypatch):
     result = _extract_html(b"<html>content</html>")
     assert result == "Clean text content"
     mock_bs4.BeautifulSoup.assert_called_once()
+
+
+def test_extract_epub_mocked(monkeypatch):
+    """Test EPUB extraction with mocked EbookLib and BeautifulSoup."""
+    item1, item2 = MagicMock(), MagicMock()
+    item1.get_body_content.return_value = b"<body><h1>Intro</h1><p>First</p></body>"
+    item2.get_body_content.return_value = b"<body><p>Second</p></body>"
+
+    mock_book = MagicMock()
+    mock_book.get_items_of_type.return_value = [item1, item2]
+
+    mock_epub_module = MagicMock()
+    mock_epub_module.read_epub.return_value = mock_book
+
+    mock_ebooklib = MagicMock()
+    mock_ebooklib.ITEM_DOCUMENT = 9
+    mock_ebooklib.epub = mock_epub_module
+
+    mock_soup = MagicMock()
+    mock_soup.get_text.side_effect = ["Intro\nFirst", "Second"]
+    mock_bs4 = MagicMock()
+    mock_bs4.BeautifulSoup = MagicMock(return_value=mock_soup)
+
+    monkeypatch.setitem(sys.modules, "ebooklib", mock_ebooklib)
+    monkeypatch.setitem(sys.modules, "ebooklib.epub", mock_epub_module)
+    monkeypatch.setitem(sys.modules, "bs4", mock_bs4)
+
+    from file_processor import _extract_epub
+    result = _extract_epub(b"fake epub bytes")
+
+    assert result == "Intro\nFirst\n\nSecond"
+    mock_epub_module.read_epub.assert_called_once()
+    mock_book.get_items_of_type.assert_called_once_with(9)
 
 
 # ─── process_file pipeline (mocked via sys.modules) ────────────────

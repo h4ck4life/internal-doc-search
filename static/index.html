@@ -511,14 +511,14 @@
     <section class="card card-pad mb-4">
       <div class="section-title">Upload Document</div>
       <div class="flex flex-wrap gap-2 items-end">
-        <input type="file" id="fileInput" accept=".pdf,.docx,.txt,.md,.html,.htm,.csv,.json"
+        <input type="file" id="fileInput" accept=".pdf,.docx,.epub,.txt,.md,.html,.htm,.csv,.json"
                class="field flex-[2] min-w-[180px]" style="padding:0.42rem 0.7rem">
         <input type="text" id="fileLabels" placeholder="Labels (required, comma-separated)"
                class="field flex-1 min-w-[160px]"
                oninput="this.classList.remove('field-error')" onkeydown="if(event.key==='Enter')uploadFile()">
         <button id="uploadBtn" onclick="uploadFile()" class="btn btn-primary flex-shrink-0">↑ Upload</button>
       </div>
-      <div class="help mt-1.5">PDF, DOCX, TXT, MD, HTML, CSV, JSON — max 50 MB. Label required<span class="req-star">*</span>.</div>
+      <div class="help mt-1.5">PDF, DOCX, EPUB, TXT, MD, HTML, CSV, JSON — max 50 MB. Label required<span class="req-star">*</span>.</div>
       <div id="fileMsg" class="status-msg mt-2"></div>
     </section>
     <div id="fileBulkBar" class="bulk-bar">
@@ -564,7 +564,7 @@
                oninput="this.classList.remove('field-error')" onkeydown="if(event.key==='Enter')addFolderWatch()">
         <button id="addFolderBtn" onclick="addFolderWatch()" class="btn btn-primary flex-shrink-0">+ Watch</button>
       </div>
-      <div class="help mt-1.5">Scans the folder and subfolders for PDF, DOCX, TXT, MD, HTML, CSV, and JSON files.</div>
+      <div class="help mt-1.5">Scans the folder and subfolders for PDF, DOCX, EPUB, TXT, MD, HTML, CSV, and JSON files.</div>
       <div class="help mt-1" id="folderAllowedRoots">Allowed roots: loading…</div>
       <div id="folderMsg" class="status-msg mt-2"></div>
     </section>
