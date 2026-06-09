@@ -77,10 +77,10 @@ python ingest.py
 
 **MCP config — project `.mcp.json`** (auto-connects Claude Code):
 ```json
-{"mcpServers": {"doc-search": {"type": "http", "url": "http://localhost:8000/mcp/"}}}
+{"mcpServers": {"recall": {"type": "http", "url": "http://localhost:8000/mcp/"}}}
 ```
-Or add per-project: `claude mcp add --transport http doc-search http://localhost:8000/mcp/`
-Or add globally: `claude mcp add --scope user --transport http doc-search http://localhost:8000/mcp/`
+Or add per-project: `claude mcp add --transport http recall http://localhost:8000/mcp/`
+Or add globally: `claude mcp add --scope user --transport http recall http://localhost:8000/mcp/`
 
 **Background ingest**: `POST /ingest` spawns a `threading.Thread` with its own asyncio event loop running `ingest.run_ingest()`. The main API event loop is never blocked — homepage stays responsive during crawl. Progress tracked in module-level `_ingest_state` dict, polled via `GET /ingest/status`. Frontend polls every 1s during crawl. `ingest.py` also supports standalone CLI: `python ingest.py --mode {all|new}`.
 

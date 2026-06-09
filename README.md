@@ -157,7 +157,7 @@ The LLM will:
 ```json
 {
   "mcpServers": {
-    "doc-search": {
+    "recall": {
       "type": "http",
       "url": "http://localhost:8000/mcp/"
     }
@@ -168,13 +168,13 @@ The LLM will:
 **Option B — CLI (add to this project):**
 
 ```bash
-claude mcp add --transport http doc-search http://localhost:8000/mcp/
+claude mcp add --transport http recall http://localhost:8000/mcp/
 ```
 
 **Option C — CLI (add globally, all projects):**
 
 ```bash
-claude mcp add --scope user --transport http doc-search http://localhost:8000/mcp/
+claude mcp add --scope user --transport http recall http://localhost:8000/mcp/
 ```
 
 ### Configure in Claude Desktop
@@ -183,7 +183,7 @@ Settings → Developer → MCP Servers → Add:
 
 ```json
 {
-  "doc-search": {
+  "recall": {
     "type": "http",
     "url": "http://localhost:8000/mcp/"
   }
@@ -197,7 +197,7 @@ Add to `.codex/config.json` or equivalent:
 ```json
 {
   "mcpServers": {
-    "doc-search": {
+    "recall": {
       "transport": "streamable-http",
       "url": "http://localhost:8000/mcp/"
     }
@@ -350,7 +350,7 @@ python -m pytest tests/test_store.py::test_add_url -v
 ## Project Structure
 
 ```
-internal-doc-search/
+internal-recall/
 ├── api.py              # FastAPI server (15 endpoints)
 ├── mcp_server.py       # MCP server (6 LLM agent tools)
 ├── search_utils.py     # Shared search logic — label parsing, filter building, result normalization, boost blending, source diversity, hints (used by both API + MCP)
