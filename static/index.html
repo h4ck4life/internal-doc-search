@@ -55,6 +55,7 @@
   .card{background:var(--surface);border:1px solid var(--border);border-radius:12px;}
   .card-pad{padding:1.2rem 1.25rem;}
   .section-title{font-size:0.9rem;font-weight:600;display:flex;align-items:center;gap:0.5rem;margin-bottom:0.9rem;color:var(--text);}
+  .section-actions{margin-left:auto;display:flex;align-items:center;gap:0.45rem;flex-wrap:wrap;}
 
   /* ── Buttons ── */
   .btn{display:inline-flex;align-items:center;justify-content:center;gap:0.4rem;padding:0.5rem 0.9rem;font-size:0.82rem;font-weight:500;line-height:1;border-radius:8px;border:1px solid transparent;cursor:pointer;transition:background-color 0.12s,border-color 0.12s,color 0.12s,opacity 0.12s;white-space:nowrap;text-decoration:none;user-select:none;}
@@ -584,7 +585,12 @@
   <!-- ══ API & MCP ══ -->
   <div class="tab-section" data-section="api">
     <section class="card card-pad mb-4">
-      <div class="section-title">API Endpoints <span class="text-muted" style="font-weight:400;font-size:0.78rem;margin-left:0.25rem">(17)</span></div>
+      <div class="section-title">
+        API Endpoints <span class="text-muted" style="font-weight:400;font-size:0.78rem;margin-left:0.25rem">(17)</span>
+        <span class="section-actions">
+          <a class="btn btn-primary btn-sm" href="/swagger" target="_blank" rel="noopener">Open Swagger UI</a>
+        </span>
+      </div>
       <div>
         <div class="api-row"><span class="method get">GET</span><span class="api-path">/search?q=&amp;limit=&amp;label=</span><span class="api-desc">Two-stage semantic search; multi-label (OR) with -prefix exclusion</span></div>
         <div class="api-row"><span class="method get">GET</span><span class="api-path">/labels</span><span class="api-desc">List distinct labels (with URL counts)</span></div>
