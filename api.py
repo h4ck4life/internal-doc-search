@@ -1,11 +1,14 @@
 """FastAPI server exposing /search with two-stage retrieval + UI support endpoints."""
 
+import json
 import os
 import threading
 from contextlib import asynccontextmanager
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.openapi.docs import get_swagger_ui_html
+from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from qdrant_client import AsyncQdrantClient, models
@@ -164,8 +167,86 @@ class URLUpdate(BaseModel):
     deep_crawl_exclude_pattern: Optional[str] = None
 
 
+def _yaml_scalar(value: Any) -> str:
+    """Render a JSON-compatible scalar as YAML."""
+    if value is None:
+        return "null"
+    if value is True:
+        return "true"
+    if value is False:
+        return "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    return json.dumps(str(value), ensure_ascii=False)
+
+
+def _yaml_lines(value: Any, indent: int = 0) -> list[str]:
+    """Serialize OpenAPI's JSON-compatible structure to readable YAML."""
+    prefix = " " * indent
+    if isinstance(value, dict):
+        if not value:
+            return [prefix + "{}"]
+        lines: list[str] = []
+        for key, item in value.items():
+            key_text = json.dumps(str(key), ensure_ascii=False)
+            if isinstance(item, (dict, list)) and item:
+                lines.append(f"{prefix}{key_text}:")
+                lines.extend(_yaml_lines(item, indent + 2))
+            elif isinstance(item, dict):
+                lines.append(f"{prefix}{key_text}: {{}}")
+            elif isinstance(item, list):
+                lines.append(f"{prefix}{key_text}: []")
+            else:
+                lines.append(f"{prefix}{key_text}: {_yaml_scalar(item)}")
+        return lines
+    if isinstance(value, list):
+        if not value:
+            return [prefix + "[]"]
+        lines = []
+        for item in value:
+            if isinstance(item, (dict, list)) and item:
+                lines.append(f"{prefix}-")
+                lines.extend(_yaml_lines(item, indent + 2))
+            elif isinstance(item, dict):
+                lines.append(f"{prefix}- {{}}")
+            elif isinstance(item, list):
+                lines.append(f"{prefix}- []")
+            else:
+                lines.append(f"{prefix}- {_yaml_scalar(item)}")
+        return lines
+    return [prefix + _yaml_scalar(value)]
+
+
+def _to_yaml(value: Any) -> str:
+    return "\n".join(_yaml_lines(value)) + "\n"
+
+
 
 # ─── Endpoints ───────────────────────────────────────────────────
+
+
+@app.get("/openapi.yaml", include_in_schema=False)
+async def openapi_yaml():
+    """Serve the generated OpenAPI schema as YAML."""
+    return Response(
+        content=_to_yaml(app.openapi()),
+        media_type="application/yaml; charset=utf-8",
+    )
+
+
+@app.get("/openapi.yml", include_in_schema=False)
+async def openapi_yml():
+    """YAML OpenAPI schema alias."""
+    return await openapi_yaml()
+
+
+@app.get("/swagger", include_in_schema=False)
+async def swagger_ui():
+    """Serve Swagger UI backed by the YAML OpenAPI endpoint."""
+    return get_swagger_ui_html(
+        openapi_url="/openapi.yaml",
+        title=f"{app.title} - Swagger UI",
+    )
 
 
 @app.get("/search")

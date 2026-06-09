@@ -73,6 +73,40 @@ def test_health_healthy(client):
         assert response.json()["status"] == "healthy"
 
 
+# ─── OpenAPI / Swagger docs ──────────────────────────────────────
+
+
+def test_openapi_yaml_endpoint(client):
+    """/openapi.yaml returns the generated OpenAPI document as YAML."""
+    response = client.get("/openapi.yaml")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/yaml")
+    text = response.text
+    assert '"openapi": "3.' in text
+    assert '"/search":' in text
+    assert '"/health":' in text
+
+
+def test_openapi_yml_alias(client):
+    """/openapi.yml aliases /openapi.yaml."""
+    response = client.get("/openapi.yml")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/yaml")
+    assert '"/search":' in response.text
+
+
+def test_swagger_ui_uses_yaml_endpoint(client):
+    """/swagger serves Swagger UI configured against /openapi.yaml."""
+    response = client.get("/swagger")
+
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+    assert "Swagger UI" in response.text
+    assert "/openapi.yaml" in response.text
+
+
 # ─── Search endpoint ──────────────────────────────────────────────
 
 
