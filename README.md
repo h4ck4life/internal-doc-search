@@ -110,9 +110,9 @@ The server exposes an **MCP (Model Context Protocol)** endpoint at `/mcp/`. LLM 
 | Tool | Description |
 |------|-------------|
 | `list_labels()` | **Call first** — discover available topics/languages with chunk counts |
-| `search_docs(query, limit, labels, label_match_mode)` | Semantic search with full-chunk content, enriched metadata (page title, section heading, content type), cross-encoder rerank, multi-label filter, boost mode, source diversity, low-CE hints |
-| `get_chunks_for_url(url, limit, offset)` | Fetch all chunks from a URL (paginated) — explore full document context after a promising search hit |
-| `get_adjacent_chunks(url, chunk_index, page_index, window)` | Fetch surrounding chunks — see what comes before/after a specific chunk |
+| `search_docs(query, limit, labels, label_match_mode)` | Semantic search with full-chunk content, enriched metadata, cross-encoder rerank, multi-label filter, boost mode, source diversity, low-CE hints, and `_guidance` retry plans |
+| `get_chunks_for_url(url, limit, offset)` | Fetch all chunks from a URL (paginated) — inspect the full source before deciding an answer is absent |
+| `get_adjacent_chunks(url, chunk_index, page_index, window)` | Fetch surrounding chunks — see what comes before/after a specific chunk when an answer spans boundaries |
 | `add_url_to_crawl(url, labels, deep_crawl, depth, patterns)` | Add documentation URL with multi-label and deep crawl config. Auto-registers discovered pages during deep crawl |
 | `trigger_crawl(mode)` | Start background crawl in a dedicated thread (non-blocking): `"all"` recrawls everything, `"new"` only pending/failed |
 
@@ -137,8 +137,18 @@ use doc search with labels mcp and label_match_mode boost, how do AI agents work
 The LLM will:
 1. Call `list_labels()` if it needs to discover available topics
 2. Call `search_docs()` with your query + label filter
-3. Call `get_chunks_for_url()` or `get_adjacent_chunks()` to explore surrounding context
-4. Present results with cross-encoder scores, page titles, and section headings
+3. Follow `search_docs()` `_guidance.next_steps` when results are empty, weak, or only partially relevant
+4. Retry with boost mode, nearby labels, and alternate query wording before giving up
+5. Call `get_chunks_for_url()` or `get_adjacent_chunks()` to explore surrounding context
+6. Present results with cross-encoder scores, page titles, and section headings
+
+`search_docs()` returns `_guidance` when it can help the agent continue searching:
+
+- `query_variants_to_try` — simplified/expanded phrasings, including common acronym expansions
+- `available_labels` — labels discovered from indexed chunks
+- `current_filters` — parsed include/exclude labels and label match mode
+- `next_steps` — concrete tool calls to try next, such as boost search, broad search, `list_labels`, `get_adjacent_chunks`, or `get_chunks_for_url`
+- `caution` — warns when low scores should be treated as leads, not proof that the docs have no answer
 
 ### Configure in Claude Code
 
@@ -262,7 +272,7 @@ These are read at startup and override defaults. Set them in your shell or in `d
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CRAWL_WAIT_UNTIL` | `networkidle` | Playwright wait strategy. Use `load` if `networkidle` stalls on long-polling/WebSocket SPAs. Other values: `domcontentloaded`, `commit`. |
+| `CRAWL_WAIT_UNTIL` | `load` | Playwright wait strategy. `load` works better with anti-bot detection; use `networkidle` if ordinary SPAs return partial content. Other values: `domcontentloaded`, `commit`. |
 | `CRAWL_DELAY_BEFORE_HTML` | `2.0` | Seconds to wait after page load before capturing HTML. Bump to 3–4 if the app is slow to paint (lazy-rendered content). |
 | `CRAWL_PAGE_TIMEOUT_MS` | `60000` | Page load timeout in milliseconds. Raise if you start seeing timeouts from longer waits (e.g., `120000` for 2 min). |
 | `CRAWL_WAIT_FOR_SELECTOR` | (unset) | Optional CSS selector to wait for before capture, e.g. `main`, `article`, or `#root .docs-content`. Useful when an SPA paints content after network idle. |
@@ -276,9 +286,11 @@ These are read at startup and override defaults. Set them in your shell or in `d
 | `CRAWL_FLATTEN_SHADOW_DOM` | `true` | Pulls Shadow DOM text into the extracted page, useful for web-component docs and SPA shells. |
 | `CRAWL_REMOVE_OVERLAYS` | `true` | Removes modal/overlay elements before extraction. Helps cookie banners, newsletter popups, and interstitials. |
 | `CRAWL_REMOVE_CONSENT_POPUPS` | `true` | Specifically tries to remove consent popups before extraction. |
-| `CRAWL_SIMULATE_USER` | `false` | Simulates user interaction. Leave off for deterministic docs crawling; enable only for sites that reveal content after interaction. |
-| `CRAWL_MAGIC` | `false` | Crawl4AI convenience mode for extra interaction/anti-bot behavior. Leave off by default; enable for difficult SPAs after normal waits fail. |
-| `CRAWL_OVERRIDE_NAVIGATOR` | `false` | Adjusts browser navigator signals. Enable only for sites blocking automated browsers. |
+| `CRAWL_MAX_RETRIES` | `2` | Crawl4AI retry count for transient or anti-bot-like failures. |
+| `CRAWL_SIMULATE_USER` | `true` | Simulates user interaction. Disable for maximum determinism if a site crawls cleanly without it. |
+| `CRAWL_MAGIC` | `true` | Crawl4AI convenience mode for extra interaction/anti-bot behavior. Disable if it makes a site slower or less deterministic. |
+| `CRAWL_OVERRIDE_NAVIGATOR` | `true` | Adjusts browser navigator signals to reduce automated-browser detection. |
+| `CRAWL_ENABLE_STEALTH` | `true` | Enables Crawl4AI browser stealth mode. |
 | `CRAWL_DEEP_MAX_PAGES` | `500` | Safety cap for one deep-crawl seed. Set `0` for unlimited, or reduce for broad sites. |
 | `CRAWL_USER_AGENT_MODE` | `random` | Crawl4AI browser user-agent mode. `random` avoids a stale fixed UA while keeping normal Chromium behavior. |
 

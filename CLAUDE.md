@@ -43,9 +43,9 @@ python ingest.py
 | Tool | Purpose |
 |---|---|
 | `list_labels()` | Discover available topics/languages — call first before `search_docs` |
-| `search_docs(query, limit, labels, label_match_mode)` | Two-stage retrieval with multi-label filter, boost mode, source diversity, enriched metadata, and low-relevance hint |
-| `get_chunks_for_url(url, limit, offset)` | Fetch all chunks from a URL (paginated) — explore full document context |
-| `get_adjacent_chunks(url, chunk_index, page_index, window)` | Fetch surrounding chunks — context exploration around a result |
+| `search_docs(query, limit, labels, label_match_mode)` | Two-stage retrieval with multi-label filter, boost mode, source diversity, enriched metadata, low-relevance hints, and `_guidance` retry plans |
+| `get_chunks_for_url(url, limit, offset)` | Fetch all chunks from a URL (paginated) — inspect full source context before saying an answer is absent |
+| `get_adjacent_chunks(url, chunk_index, page_index, window)` | Fetch surrounding chunks — context exploration around a result, especially when answers span chunk boundaries |
 | `add_url_to_crawl(url, labels, deep_crawl, ...)` | Add URL with multi-label support and deep crawl config |
 | `trigger_crawl(mode)` | Start crawl: `mode="all"` recrawls everything, `mode="new"` only pending/failed |
 
@@ -94,7 +94,9 @@ Or add globally: `claude mcp add --scope user --transport http doc-search http:/
 
 **fit_markdown**: Crawl4AI's `result.markdown.fit_markdown` extracts the main page content (like browser reader mode), automatically stripping navigation, sidebars, footers, and other boilerplate. Falls back to raw `markdown` if `fit_markdown` is empty.
 
-**Low-relevance hints**: `/search` API and MCP `search_docs` both return `_hint` when the best cross-encoder score is below 0.3 and no label filter is active. The hint lists available labels so the caller knows what topics/languages exist and can re-search with appropriate filters.
+**MCP search guidance**: MCP `search_docs` returns `_guidance` when results are empty, weak, or fewer than requested. `_guidance` includes `query_variants_to_try`, `available_labels`, `current_filters`, concrete `next_steps`, and optional `caution`. Agents should follow these steps before concluding the docs have no answer: retry with closest labels, use `label_match_mode="boost"`, broaden filters, try alternate wording/acronym expansion, then inspect context via `get_adjacent_chunks` or `get_chunks_for_url`.
+
+**Low-relevance hints**: `/search` API returns `_hint` when the best cross-encoder score is below 0.3 and no label filter is active. MCP `search_docs` returns `_hint` whenever best score is below 0.3, including filtered searches, and includes `_guidance` so the caller knows how to re-search creatively.
 
 **min_ce_threshold** config (default 0.0, range 0–1): Filters results whose cross-encoder score falls below the threshold. Applied in both hard and boost label modes.
 
