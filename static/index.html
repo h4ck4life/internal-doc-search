@@ -283,6 +283,10 @@
   .pager button:hover:not(:disabled) { border-color: #3d4753; background: var(--surface-2); }
   .pager button.active { background: var(--accent-700); border-color: var(--accent-700); color: #fff; }
   .pager button:disabled { opacity: 0.4; cursor: not-allowed; }
+  /* Configuration rows + descriptions */
+  #configForm .space-y-3 > div { padding-bottom: 0.8rem; border-bottom: 1px solid var(--border-soft); }
+  #configForm .space-y-3 > div:last-child { border-bottom: none; padding-bottom: 0; }
+  .cfg-desc { flex-basis: 100%; margin-top: 0.35rem; font-size: 0.78rem; line-height: 1.5; color: #aab2bd; max-width: 64ch; }
 
   /* Inline status messages */
   .status-msg { font-size: 0.85rem; margin-top: 0.6rem; }
@@ -430,22 +434,22 @@
         <div class="flex flex-wrap items-center gap-3">
           <label for="cfgChunkMaxChars" class="w-28 flex-shrink-0 text-sm">Chunk size</label>
           <input type="number" id="cfgChunkMaxChars" min="500" max="5000" step="100" class="field field-num w-24">
-          <span class="help">500–5000 chars</span>
+          <span class="help">500–5000 chars</span><span class="cfg-desc">Max characters per chunk. Larger keeps more context per result, smaller gives tighter matches. Re-ingest after changing.</span>
         </div>
         <div class="flex flex-wrap items-center gap-3">
           <label for="cfgChunkOverlap" class="w-28 flex-shrink-0 text-sm">Overlap</label>
           <input type="number" id="cfgChunkOverlap" min="0" max="500" step="50" class="field field-num w-24">
-          <span class="help">0–500 chars</span>
+          <span class="help">0–500 chars</span><span class="cfg-desc">Characters shared between neighbouring chunks. Raise if answers get cut off at chunk boundaries. Re-ingest after changing.</span>
         </div>
         <div class="flex flex-wrap items-center gap-3">
           <label for="cfgSearchLimit" class="w-28 flex-shrink-0 text-sm">Search limit</label>
           <input type="number" id="cfgSearchLimit" min="1" max="20" class="field field-num w-24">
-          <span class="help">1–20 results</span>
+          <span class="help">1–20 results</span><span class="cfg-desc">How many results to return per search. Higher shows more (and more pages), lower keeps just the top hits.</span>
         </div>
         <div class="flex flex-wrap items-center gap-3">
           <label for="cfgRerankCandidates" class="w-28 flex-shrink-0 text-sm">Rerank pool</label>
           <input type="number" id="cfgRerankCandidates" min="10" max="200" step="10" class="field field-num w-24">
-          <span class="help">10–200 candidates</span>
+          <span class="help">10–200 candidates</span><span class="cfg-desc">Candidates fetched before the cross-encoder reranks them. Higher is more accurate but slower, lower is faster.</span>
         </div>
         <div class="flex flex-wrap items-center gap-3">
           <label for="cfgLabelMatchMode" class="w-28 flex-shrink-0 text-sm">Label match</label>
@@ -453,17 +457,17 @@
             <option value="hard">hard</option>
             <option value="boost">boost</option>
           </select>
-          <span class="help">hard=filter · boost=score-blend</span>
+          <span class="help">hard=filter · boost=score-blend</span><span class="cfg-desc">hard hides off-label docs, boost lets them surface lower down. Use boost when your labels may be incomplete.</span>
         </div>
         <div class="flex flex-wrap items-center gap-3">
           <label for="cfgLabelBoostWeight" class="w-28 flex-shrink-0 text-sm">Boost weight</label>
           <input type="number" id="cfgLabelBoostWeight" min="0" max="1" step="0.05" class="field field-num w-24">
-          <span class="help">0–1 (label blend)</span>
+          <span class="help">0–1 (label blend)</span><span class="cfg-desc">Boost mode only. How strongly a label match lifts a result. Higher favours on-label hits.</span>
         </div>
         <div class="flex flex-wrap items-center gap-3">
           <label for="cfgMinCeThreshold" class="w-28 flex-shrink-0 text-sm">Min CE score</label>
           <input type="number" id="cfgMinCeThreshold" min="0" max="1" step="0.05" class="field field-num w-24">
-          <span class="help">0–1 (filter low CE)</span>
+          <span class="help">0–1 (filter low CE)</span><span class="cfg-desc">Hides results below this cross-encoder score. Raise to filter out weak matches, 0 shows everything.</span>
         </div>
       </div>
 
