@@ -37,9 +37,9 @@ python ingest.py
 - **SQLite** (`data/config.db`, WAL mode): configuration store — URLs to crawl, crawl history, app config (chunk size, overlap, search limit, rerank pool, label match mode, boost weight, min CE threshold). Accessed via `store.py` functions only. Multi-label URLs stored in `url_labels` linking table.
 - **Qdrant** (`qdrant_data/`): vector embeddings + payload (`url`, `label`, `chunk_index`, `page_index`, `content`, `page_title`, `section_heading`, `content_type`, `total_chunks`). Collection: `internal_docs`. Each chunk is replicated once per label so any single label filter matches.
 
-**MCP endpoint** (`/mcp/` — trailing slash required): Exposes 6 tools for LLM agents — `list_labels`, `search_docs`, `get_chunks_for_url`, `get_adjacent_chunks`, `add_url_to_crawl`, `trigger_crawl`. Uses FastMCP 3.x (`http_app(path="/")` + manual nested `async with` lifespan). Mount is at `/mcp` with sub-app route at `/`; Starlette strips `/mcp/` prefix leaving `/` which matches. The trailing slash is needed because stripping `/mcp` leaves `""` which doesn't match `/`. Static files mount at `/static` (NOT `/`) to avoid the `/` mount from intercepting `/mcp` routes. Dashboard served at `/` via `FileResponse`.
+**MCP endpoint** (`/mcp/` — trailing slash required): Exposes 10 tools for LLM agents — `list_labels`, `search_docs`, `get_chunks_for_url`, `get_adjacent_chunks`, `add_url_to_crawl`, `trigger_crawl`, `recrawl_url`, `upload_file`, `delete_file`, `list_files`. Uses FastMCP 3.x (`http_app(path="/")` + manual nested `async with` lifespan). Mount is at `/mcp` with sub-app route at `/`; Starlette strips `/mcp/` prefix leaving `/` which matches. The trailing slash is needed because stripping `/mcp` leaves `""` which doesn't match `/`. Static files mount at `/static` (NOT `/`) to avoid the `/` mount from intercepting `/mcp` routes. Dashboard served at `/` via `FileResponse`.
 
-**Six MCP tools:**
+**Ten MCP tools:**
 | Tool | Purpose |
 |---|---|
 | `list_labels()` | Discover available topics/languages — call first before `search_docs` |
@@ -48,6 +48,10 @@ python ingest.py
 | `get_adjacent_chunks(url, chunk_index, page_index, window)` | Fetch surrounding chunks — context exploration around a result, especially when answers span chunk boundaries |
 | `add_url_to_crawl(url, labels, deep_crawl, ...)` | Add URL with multi-label support and deep crawl config |
 | `trigger_crawl(mode)` | Start crawl: `mode="all"` recrawls everything, `mode="new"` only pending/failed |
+| `recrawl_url(url)` | Re-crawl a single URL by URL string |
+| `upload_file(filename, content_b64, labels, mime_type)` | Upload a document file for chunking and indexing |
+| `delete_file(file_id)` | Delete an uploaded file and its Qdrant vectors |
+| `list_files(limit, offset)` | List all uploaded files with labels and chunk counts |
 
 **Deep crawl per URL**: Each URL in `store.py` has `deep_crawl`, `deep_crawl_max_depth`, `deep_crawl_url_pattern` (comma-separated wildcards → `URLPatternFilter` via `FilterChain`), and `deep_crawl_exclude_pattern` (post-crawl result filtering via `_wildcard_match()`). The `url_pattern`/`exclude_pattern` params in the user-facing API map to Crawl4AI's `FilterChain` + `URLPatternFilter` — they are NOT direct BFSDeepCrawlStrategy constructor arguments.
 
@@ -102,6 +106,6 @@ Or add globally: `claude mcp add --scope user --transport http recall http://loc
 
 **MCP full content**: `search_docs` returns the complete chunk content (up to `chunk_max_tokens` = 400 tokens, ~1500 chars). No truncation. Enriched metadata — `page_title`, `section_heading`, `content_type`, `total_chunks` — included in every result. The API `/search` endpoint also returns full content with metadata.
 
-**Dashboard UI**: Tailwind CSS (Play CDN) with dark theme. Sections: stats bar (4-cards), search with label chips, URLs table, config form, API endpoint reference, MCP setup guide. Mobile responsive (stacks to single column). See `static/index.html`.
+**Dashboard UI (Recall)**: Tailwind CSS (Play CDN) with dark theme. Sections: stats bar, search with label chip filter, URLs table, Documents table, Config form, API endpoint reference, MCP setup guide. Mobile responsive. See `static/index.html`.
 
 **Test fixtures** (`tests/conftest.py`): `temp_db` swaps `store.DB_PATH` to a temp dir, `client` creates a FastAPI `TestClient`. Tests that need Qdrant are marked `@pytest.mark.qdrant`.

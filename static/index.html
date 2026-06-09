@@ -861,7 +861,13 @@ async function uploadFile(){
   try{
     const form=new FormData();form.append('file',input.files[0]);form.append('labels',labelsVal);
     const r=await fetch('/files',{method:'POST',body:form});const d=await r.json();
-    if(!r.ok){_flashMsg(msgEl,d.detail||'Upload failed','err');return;}
+    if(!r.ok){
+      const detail=d.detail;
+      const msg=detail?.status==='duplicate_file'
+        ? `Duplicate file: already uploaded as "${detail.file?.filename||'existing file'}".`
+        : (typeof detail==='string'?detail:'Upload failed');
+      _flashMsg(msgEl,msg,'err');return;
+    }
     _flashMsg(msgEl,`Uploaded "${d.filename}" — ${d.status==='pending'?'processing…':d.chunk_count+' chunks'}`,'ok');
     input.value='';labelsEl.value='';await loadSummary();await loadFiles();
   }catch(e){_flashMsg(msgEl,'Network error: '+e.message,'err');}

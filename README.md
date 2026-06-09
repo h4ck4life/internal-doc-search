@@ -1,8 +1,8 @@
-# Internal Doc Search 🔍
+# Recall 🔍
 
-Semantic search for internal technical documentation. Crawls JS-heavy SPA doc sites, chunks with token-aware boundaries, enriches with structural metadata, embeds with a QA-tuned model, stores in Qdrant, and serves results via a FastAPI with two-stage retrieval (bi-encoder recall → cross-encoder rerank → sigmoid normalization) plus source diversity.
+Semantic search for your internal documentation. Crawls JS-heavy SPA doc sites, chunks with token-aware boundaries, enriches with structural metadata, embeds with a QA-tuned model, stores in Qdrant, and serves results via a FastAPI with two-stage retrieval (bi-encoder recall → cross-encoder rerank → sigmoid normalization) plus source diversity.
 
-Also exposes an **MCP endpoint** with 6 tools so Claude Code, Claude Desktop, Codex, and other LLM agents can search docs, discover topics, explore surrounding context, add URLs, and trigger crawling directly.
+Also exposes an **MCP endpoint** with 10 tools so Claude Code, Claude Desktop, Codex, and other LLM agents can search docs, discover topics, explore surrounding context, add URLs, and trigger crawling directly.
 
 ## Architecture
 
@@ -91,19 +91,19 @@ curl "http://localhost:8000/search?q=setup&label=Auth&label_match_mode=boost"
 
 ## Dashboard UI
 
-The web dashboard at `http://localhost:8000/` provides:
+The Recall web dashboard at `http://localhost:8000/` provides:
 
 - **Stats bar** — URLs configured, crawled, total chunks, last crawl time
 - **Search** — Full-text semantic search with label chip filter (type to autocomplete, prefix with `-` to exclude)
-- **Recrawl buttons** — "Recrawl New" (pending/failed only) and "Recrawl All" (everything)
+- **Crawl buttons** — "Crawl Pending" (pending/failed only) and "Recrawl All" (everything)
 - **URLs table** — Add/edit/delete crawl URLs, configure deep crawl with include/exclude patterns
 - **Configuration** — Chunk size, overlap, search limit, rerank pool, label match mode (hard/boost), boost weight
-- **API Endpoints reference** — All 13 endpoints documented
+- **API Endpoints reference** — All 17 endpoints documented
 - **MCP Setup guide** — Claude Code, Claude Desktop, and custom client configuration
 
 ## MCP Endpoint — LLM Integration
 
-The server exposes an **MCP (Model Context Protocol)** endpoint at `/mcp/`. LLM agents can call 6 tools.
+The server exposes an **MCP (Model Context Protocol)** endpoint at `/mcp/`. LLM agents can call 10 tools.
 
 ### MCP Tools
 
@@ -115,6 +115,10 @@ The server exposes an **MCP (Model Context Protocol)** endpoint at `/mcp/`. LLM 
 | `get_adjacent_chunks(url, chunk_index, page_index, window)` | Fetch surrounding chunks — see what comes before/after a specific chunk when an answer spans boundaries |
 | `add_url_to_crawl(url, labels, deep_crawl, depth, patterns)` | Add documentation URL with multi-label and deep crawl config. Auto-registers discovered pages during deep crawl |
 | `trigger_crawl(mode)` | Start background crawl in a dedicated thread (non-blocking): `"all"` recrawls everything, `"new"` only pending/failed |
+| `recrawl_url(url)` | Re-crawl a single URL by its URL string |
+| `upload_file(filename, content_b64, labels, mime_type)` | Upload a document (PDF, DOCX, TXT, MD, HTML, CSV, JSON) for chunking and indexing |
+| `delete_file(file_id)` | Delete an uploaded file and remove its vectors from Qdrant |
+| `list_files(limit, offset)` | List all uploaded files with labels and chunk counts |
 
 ### Using from Claude Code / LLM Agents
 
@@ -245,7 +249,7 @@ curl -s -X POST http://localhost:8000/mcp/ \
 | `DELETE` | `/urls/{id}` | Remove crawl URL + cleanup Qdrant vectors |
 | `GET` | `/config` | Get all configuration values |
 | `PUT` | `/config` | Update configuration (chunk size, overlap, search limit, rerank pool, label match mode, boost weight) |
-| `MCP` | `/mcp/` | **MCP endpoint** — 6 tools: `list_labels`, `search_docs`, `get_chunks_for_url`, `get_adjacent_chunks`, `add_url_to_crawl`, `trigger_crawl` |
+| `MCP` | `/mcp/` | **MCP endpoint** — 10 tools: `list_labels`, `search_docs`, `get_chunks_for_url`, `get_adjacent_chunks`, `add_url_to_crawl`, `trigger_crawl`, `recrawl_url`, `upload_file`, `delete_file`, `list_files` |
 
 ## Configuration
 
@@ -350,7 +354,7 @@ python -m pytest tests/test_store.py::test_add_url -v
 ## Project Structure
 
 ```
-internal-recall/
+recall/
 ├── api.py              # FastAPI server (15 endpoints)
 ├── mcp_server.py       # MCP server (6 LLM agent tools)
 ├── search_utils.py     # Shared search logic — label parsing, filter building, result normalization, boost blending, source diversity, hints (used by both API + MCP)
