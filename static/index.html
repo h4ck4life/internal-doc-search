@@ -131,9 +131,9 @@
   .url-table tbody td { padding: 0.5rem 0.7rem; border-bottom: 1px solid var(--border-soft); vertical-align: middle; }
   .url-table tbody tr:last-child td { border-bottom: none; }
   .url-table tbody tr:hover { background: var(--surface-2); }
-  .url-table td:nth-child(1) { font-family: var(--mono); font-size: 0.78rem; }
-  .url-table th:nth-child(5), .url-table td:nth-child(5) { text-align: right; font-variant-numeric: tabular-nums; }
-  .url-table th:nth-child(7), .url-table td:nth-child(7) { text-align: right; white-space: nowrap; }
+  .url-table td:nth-child(2) { font-family: var(--mono); font-size: 0.78rem; }
+  .url-table th:nth-child(6), .url-table td:nth-child(6) { text-align: right; font-variant-numeric: tabular-nums; }
+  .url-table th:nth-child(8), .url-table td:nth-child(8) { text-align: right; white-space: nowrap; }
   /* Tree view (seed → discovered pages) */
   .url-tree-btn {
     background: none; border: 1px solid var(--border); border-radius: 5px;
@@ -362,7 +362,7 @@
           <input type="checkbox" id="newDeepCrawl" onchange="toggleNewDeepOptions()"> Deep crawl
         </label>
         <span class="help">max depth</span>
-        <input type="number" id="newDeepDepth" value="3" min="1" max="10" class="field field-num w-16 !py-1.5">
+        <input type="number" id="newDeepDepth" value="1" min="1" max="10" class="field field-num w-16 !py-1.5">
       </div>
       <div id="newDeepOptions" class="hidden mt-2">
         <div class="flex flex-wrap gap-2 items-center">
@@ -376,14 +376,24 @@
       <div id="urlMsg" class="status-msg hidden"></div>
 
       <!-- URLs table -->
+      <div id="bulkBar" class="hidden" style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;margin-top:0.75rem;padding:0.5rem 0.75rem;background:var(--surface-2);border:1px solid var(--border);border-radius:9px">
+        <span id="bulkCount" style="font-size:0.82rem;font-weight:600">0 selected</span>
+        <button id="bulkRecrawlBtn" class="btn btn-ghost btn-sm" onclick="bulkRecrawl()">🔄 Recrawl selected</button>
+        <button id="bulkDeleteBtn" class="btn btn-sm" style="border:1px solid rgba(248,81,73,0.4);color:var(--red);background:transparent" onclick="bulkDelete()">🗑 Delete selected</button>
+        <button class="btn btn-ghost btn-sm" onclick="clearSelection()">Clear</button>
+        <button id="bulkCancelBtn" class="btn btn-ghost btn-sm hidden" onclick="_bulkCancel=true" title="Stop after the current item finishes">✕ Cancel</button>
+        <span id="bulkProgress" class="hidden" style="font-size:0.78rem;color:var(--muted)"></span>
+        <span id="bulkSub" style="font-size:0.72rem;color:var(--muted)"></span>
+      </div>
       <div class="table-scroll mt-3">
         <table id="urlTable" class="url-table">
           <colgroup>
-            <col style="width:36%"><col style="width:14%"><col style="width:12%">
+            <col style="width:34px"><col style="width:34%"><col style="width:14%"><col style="width:12%">
             <col style="width:9%"><col style="width:8%"><col style="width:13%"><col style="width:8%">
           </colgroup>
           <thead>
             <tr>
+              <th style="text-align:center;cursor:default"><input type="checkbox" id="urlSelectAll" onclick="toggleSelectAll(this.checked)" title="Select all seed rows"></th>
               <th data-key="url"    onclick="sortUrls('url')">URL<span class="sort-ind">↕</span></th>
               <th data-key="label"  onclick="sortUrls('label')">Label<span class="sort-ind">↕</span></th>
               <th data-key="crawl"  onclick="sortUrls('crawl')">Crawl<span class="sort-ind">↕</span></th>
@@ -394,7 +404,7 @@
             </tr>
           </thead>
           <tbody id="urlTbody">
-            <tr><td colspan="7" class="text-center py-4" style="color:var(--muted)">Loading…</td></tr>
+            <tr><td colspan="8" class="text-center py-4" style="color:var(--muted)">Loading…</td></tr>
           </tbody>
         </table>
       </div>
@@ -695,7 +705,7 @@ function _renderUrlRow(u, isChild, isLast) {
   const firstCell = isChild
     ? `<span class="tree-twig">${isLast ? '└─' : '├─'}</span>${esc(u.url)}`
     : `${btnHtml}${esc(u.url)}`;
-  return `<tr class="${rowCls}">
+  return `<tr class="${rowCls}">${isChild ? '<td></td>' : `<td style="text-align:center"><input type="checkbox" class="url-select" data-id="${u.id}" onclick="toggleUrlSelect(${u.id}, this.checked)"></td>`}
     <td class="url-cell" style="max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(u.url)}">${firstCell}</td>
     <td title="${esc(labelsText)}">${esc(trunc(labelsText, 30))}</td>
     <td style="font-size:0.72rem;max-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(patInfo)}">${dc}${patInfo?`<br><span style="opacity:0.5">${esc(trunc(patInfo,20))}</span>`:''}</td>
@@ -722,7 +732,7 @@ async function loadUrls() {
   try {
     const raw = await (await fetch('/urls')).json();
     const urls = _sortUrls(raw);
-    if (!urls.length) { tb.innerHTML = '<tr><td colspan="7" style="text-align:center;opacity:0.4">No URLs yet. Add one above.</td></tr>'; _paintSortArrows(); return; }
+    if (!urls.length) { tb.innerHTML = '<tr><td colspan="8" style="text-align:center;opacity:0.4">No URLs yet. Add one above.</td></tr>'; _paintSortArrows(); return; }
 
     // Separate seeds (parents) and auto-discovered pages (children)
     const parents = urls.filter(u => u.parent_url_id == null);
@@ -754,7 +764,8 @@ async function loadUrls() {
 
     tb.innerHTML = html;
     _paintSortArrows();
-  } catch(e) { tb.innerHTML = '<tr><td colspan="7" style="text-align:center;color:#f87171">Failed to load</td></tr>'; }
+    _reconcileSelection();
+  } catch(e) { tb.innerHTML = '<tr><td colspan="8" style="text-align:center;color:#f87171">Failed to load</td></tr>'; }
 }
 
 function _splitLabels(s) {
@@ -765,7 +776,7 @@ let _addingUrl = false;
 async function addUrl() {
   const u = document.getElementById('newUrl').value.trim();
   const lbls = _splitLabels(document.getElementById('newLabel').value);
-  const dc = document.getElementById('newDeepCrawl').checked, dd = parseInt(document.getElementById('newDeepDepth').value) || 3;
+  const dc = document.getElementById('newDeepCrawl').checked, dd = parseInt(document.getElementById('newDeepDepth').value) || 1;
   const up = document.getElementById('newDeepUrlPattern').value.trim(), ep = document.getElementById('newDeepExcludePattern').value.trim();
   if (!u) return;
   if (_addingUrl) return;
@@ -788,7 +799,7 @@ async function addUrl() {
     if (lbls.length === 1) body.label = lbls[0];
     else if (lbls.length > 1) body.labels = lbls;
     const r = await fetch('/urls', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
-    if (r.ok) { document.getElementById('newUrl').value=''; document.getElementById('newLabel').value=''; labelField.classList.remove('field-error'); document.getElementById('newDeepCrawl').checked=false; document.getElementById('newDeepDepth').value=3; document.getElementById('newDeepUrlPattern').value=''; document.getElementById('newDeepExcludePattern').value=''; toggleNewDeepOptions(); loadUrls(); el.innerHTML='<mark style="background:#14532d;color:#4ade80">✓ Added</mark>'; }
+    if (r.ok) { document.getElementById('newUrl').value=''; document.getElementById('newLabel').value=''; labelField.classList.remove('field-error'); document.getElementById('newDeepCrawl').checked=false; document.getElementById('newDeepDepth').value=1; document.getElementById('newDeepUrlPattern').value=''; document.getElementById('newDeepExcludePattern').value=''; toggleNewDeepOptions(); loadUrls(); el.innerHTML='<mark style="background:#14532d;color:#4ade80">✓ Added</mark>'; }
     else { const d = await r.json(); el.innerHTML=`<mark style="background:#450a0a;color:#f87171">✗ ${d.detail||'Error'}</mark>`; }
   } catch(e) { el.innerHTML=`<mark style="background:#450a0a;color:#f87171">✗ ${e.message}</mark>`; }
   finally { _addingUrl = false; const b = document.getElementById('addUrlBtn'); if (b) { b.disabled = false; b.innerHTML = '+ Add'; } el.classList.remove('hidden'); setTimeout(()=>el.classList.add('hidden'),3000); }
@@ -812,6 +823,170 @@ async function recrawlUrl(id) {
   } catch(e) { alert(e.message); }
   finally { _deleting = false; }
 }
+// ─── Bulk select + actions (seed rows only) ─────────────────────
+// Frontend-only multi-select. Delete and recrawl reuse the existing
+// single-URL endpoints, so no backend change is needed. Recrawl MUST run
+// sequentially: /ingest and /urls/{id}/recrawl share one global crawl
+// thread, so firing them in parallel just returns 409 "already running".
+let _selectedUrlIds = new Set();
+let _bulkBusy = false;
+let _bulkCancel = false;
+
+function toggleUrlSelect(id, checked) {
+  if (checked) _selectedUrlIds.add(id); else _selectedUrlIds.delete(id);
+  _updateBulkBar();
+}
+
+function toggleSelectAll(checked) {
+  document.querySelectorAll('.url-select').forEach(cb => {
+    cb.checked = checked;
+    const id = parseInt(cb.dataset.id);
+    if (checked) _selectedUrlIds.add(id); else _selectedUrlIds.delete(id);
+  });
+  _updateBulkBar();
+}
+
+function clearSelection() {
+  _selectedUrlIds.clear();
+  document.querySelectorAll('.url-select').forEach(cb => cb.checked = false);
+  _updateBulkBar();
+}
+
+// After a re-render: drop ids whose row is gone, re-check the survivors,
+// so the Set and the on-screen checkboxes never drift apart.
+function _reconcileSelection() {
+  const present = new Set([...document.querySelectorAll('.url-select')].map(cb => parseInt(cb.dataset.id)));
+  [..._selectedUrlIds].forEach(id => { if (!present.has(id)) _selectedUrlIds.delete(id); });
+  document.querySelectorAll('.url-select').forEach(cb => { cb.checked = _selectedUrlIds.has(parseInt(cb.dataset.id)); });
+  _updateBulkBar();
+}
+
+function _updateBulkBar() {
+  const bar = document.getElementById('bulkBar');
+  if (!bar) return;
+  const n = _selectedUrlIds.size;
+  bar.classList.toggle('hidden', n === 0);
+  const cnt = document.getElementById('bulkCount');
+  if (cnt) cnt.textContent = `${n} selected`;
+  const boxes = document.querySelectorAll('.url-select');
+  const sa = document.getElementById('urlSelectAll');
+  if (sa) {
+    const total = boxes.length, sel = [...boxes].filter(b => b.checked).length;
+    sa.checked = total > 0 && sel === total;
+    sa.indeterminate = sel > 0 && sel < total;
+  }
+}
+
+function _setBulkRunning(running) {
+  _bulkBusy = running;
+  const del = document.getElementById('bulkDeleteBtn');
+  const re = document.getElementById('bulkRecrawlBtn');
+  const cancel = document.getElementById('bulkCancelBtn');
+  const prog = document.getElementById('bulkProgress');
+  const sub = document.getElementById('bulkSub');
+  if (del) del.disabled = running;
+  if (re) re.disabled = running;
+  if (cancel) cancel.classList.toggle('hidden', !running);
+  if (!running) {
+    if (prog) { prog.classList.add('hidden'); prog.textContent = ''; }
+    if (sub) sub.textContent = '';
+  }
+}
+
+function _setBulkProgress(text) {
+  const p = document.getElementById('bulkProgress');
+  if (p) { p.textContent = text; p.classList.remove('hidden'); }
+}
+
+function _flashUrlMsg(msg, kind) {
+  const el = document.getElementById('urlMsg');
+  if (!el) return;
+  const style = kind === 'err' ? 'background:#450a0a;color:#f87171' : 'background:#14532d;color:#4ade80';
+  el.innerHTML = `<mark style="${style}">${esc(msg)}</mark>`;
+  el.classList.remove('hidden');
+  setTimeout(() => el.classList.add('hidden'), 4000);
+}
+
+function _sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+// Resolve once the global crawl is idle. The server self-heals a dead
+// ingest thread back to idle, so this cannot hang forever.
+async function _waitForIdle() {
+  for (;;) {
+    if (_bulkCancel) return;
+    let s;
+    try { s = await (await fetch('/ingest/status')).json(); }
+    catch (e) { await _sleep(1200); continue; }
+    if (!s.running) return;
+    const sub = document.getElementById('bulkSub');
+    if (sub) sub.textContent = s.message || `${s.current_url}/${s.total_urls}`;
+    await _sleep(1200);
+  }
+}
+
+async function bulkDelete() {
+  if (_bulkBusy || _deleting) return;
+  const ids = [..._selectedUrlIds];
+  if (!ids.length) return;
+  if (!confirm(`Delete ${ids.length} selected URL(s)? Any discovered child pages are removed too.`)) return;
+  _deleting = true; _bulkCancel = false; _setBulkRunning(true);
+  let done = 0, failed = 0, skipped = 0, i = 0;
+  for (const id of ids) {
+    if (_bulkCancel) break;
+    i++; _setBulkProgress(`Deleting ${i}/${ids.length}…`);
+    try {
+      const r = await fetch(`/urls/${id}`, { method: 'DELETE' });
+      if (r.status === 404) skipped++;        // already gone (e.g. removed as a child)
+      else if (!r.ok) failed++;
+      else done++;
+    } catch (e) { failed++; }
+  }
+  _deleting = false; _setBulkRunning(false);
+  const parts = [`${done} deleted`];
+  if (skipped) parts.push(`${skipped} already gone`);
+  if (failed) parts.push(`${failed} failed`);
+  if (_bulkCancel) parts.unshift('cancelled');
+  _flashUrlMsg('Bulk delete: ' + parts.join(', '), failed ? 'err' : 'ok');
+  await loadSummary(); await loadUrls();
+}
+
+async function bulkRecrawl() {
+  if (_bulkBusy || _deleting) return;
+  const ids = [..._selectedUrlIds];
+  if (!ids.length) return;
+  if (!confirm(`Recrawl ${ids.length} selected URL(s)? They run one at a time, so this can take a while.`)) return;
+  // Don't start if a crawl is already running — recrawl shares one global slot.
+  try {
+    const s = await (await fetch('/ingest/status')).json();
+    if (s.running) { alert('A crawl is already running. Wait for it to finish, then try again.'); return; }
+  } catch (e) { alert('Could not reach the server: ' + e.message); return; }
+  _deleting = true; _bulkCancel = false; _setBulkRunning(true);
+  let done = 0, failed = 0, skipped = 0, i = 0;
+  for (const id of ids) {
+    if (_bulkCancel) break;
+    i++; _setBulkProgress(`Recrawling ${i}/${ids.length}…`);
+    try {
+      let r = await fetch(`/urls/${id}/recrawl`, { method: 'POST' });
+      if (r.status === 409) {        // slot taken — wait for idle and retry once
+        await _waitForIdle();
+        if (_bulkCancel) break;
+        r = await fetch(`/urls/${id}/recrawl`, { method: 'POST' });
+      }
+      if (r.status === 404) { skipped++; continue; }
+      if (!r.ok) { failed++; continue; }
+      await _waitForIdle();          // let this URL finish before starting the next
+      done++;
+    } catch (e) { failed++; }
+  }
+  _deleting = false; _setBulkRunning(false);
+  const parts = [`${done} recrawled`];
+  if (skipped) parts.push(`${skipped} skipped`);
+  if (failed) parts.push(`${failed} failed`);
+  if (_bulkCancel) parts.unshift('cancelled');
+  _flashUrlMsg('Bulk recrawl: ' + parts.join(', '), failed ? 'err' : 'ok');
+  await loadSummary(); await loadUrls();
+}
+
 let _deleting = false;
 async function removeUrl(id) {
   if (_deleting) return;
