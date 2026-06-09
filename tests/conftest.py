@@ -98,5 +98,7 @@ def client(monkeypatch):
     # the imported reference as well as the source.
     monkeypatch.setattr("shared._load_models", _noop_load_models)
     monkeypatch.setattr("api._load_models", _noop_load_models)
+    monkeypatch.setattr("folder_watcher.start_supervisor", lambda: None)
+    monkeypatch.setattr("folder_watcher.stop_supervisor", lambda timeout=15: None)
     with TestClient(app) as c:
         yield c

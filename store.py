@@ -86,6 +86,47 @@ def init_db() -> None:
             );
 
             CREATE INDEX IF NOT EXISTS idx_file_labels_label ON file_labels(label);
+
+            CREATE TABLE IF NOT EXISTS folder_watches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                path TEXT UNIQUE NOT NULL,
+                label TEXT DEFAULT '',
+                status TEXT DEFAULT 'stopped',
+                active INTEGER DEFAULT 0,
+                process_id INTEGER,
+                restart_count INTEGER DEFAULT 0,
+                files_indexed INTEGER DEFAULT 0,
+                error_message TEXT,
+                last_scan_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS folder_watch_labels (
+                folder_watch_id INTEGER NOT NULL REFERENCES folder_watches(id) ON DELETE CASCADE,
+                label TEXT NOT NULL,
+                PRIMARY KEY (folder_watch_id, label)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_folder_watch_labels_label ON folder_watch_labels(label);
+
+            CREATE TABLE IF NOT EXISTS folder_watch_files (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                folder_watch_id INTEGER NOT NULL REFERENCES folder_watches(id) ON DELETE CASCADE,
+                path TEXT NOT NULL,
+                file_id INTEGER REFERENCES files(id) ON DELETE SET NULL,
+                content_sha256 TEXT,
+                file_size INTEGER DEFAULT 0,
+                mtime_ns INTEGER DEFAULT 0,
+                status TEXT DEFAULT 'pending',
+                error_message TEXT,
+                last_seen_at TEXT,
+                last_ingested_at TEXT,
+                retry_after TEXT,
+                UNIQUE(folder_watch_id, path)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_folder_watch_files_watch ON folder_watch_files(folder_watch_id);
         """)
         conn.commit()
 
@@ -96,6 +137,9 @@ def init_db() -> None:
         _migrate_add_column(conn, "urls", "deep_crawl_exclude_pattern", "TEXT DEFAULT ''")
         _migrate_add_column(conn, "urls", "parent_url_id", "INTEGER REFERENCES urls(id)")
         _migrate_add_column(conn, "files", "content_sha256", "TEXT")
+        _migrate_add_column(conn, "folder_watches", "process_id", "INTEGER")
+        _migrate_add_column(conn, "folder_watches", "restart_count", "INTEGER DEFAULT 0")
+        _migrate_add_column(conn, "folder_watches", "files_indexed", "INTEGER DEFAULT 0")
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_files_content_sha256 "
             "ON files(content_sha256) WHERE content_sha256 IS NOT NULL"
@@ -539,6 +583,37 @@ def _get_file_labels(conn: sqlite3.Connection, file_id: int) -> List[str]:
     return [r["label"] for r in rows]
 
 
+def _set_folder_watch_labels(
+    conn: sqlite3.Connection, folder_watch_id: int, labels: List[str],
+) -> None:
+    """Replace labels for a watched folder."""
+    conn.execute(
+        "DELETE FROM folder_watch_labels WHERE folder_watch_id = ?",
+        (folder_watch_id,),
+    )
+    for lbl in labels:
+        conn.execute(
+            "INSERT OR IGNORE INTO folder_watch_labels (folder_watch_id, label) VALUES (?, ?)",
+            (folder_watch_id, lbl),
+        )
+
+
+def _get_folder_watch_labels(conn: sqlite3.Connection, folder_watch_id: int) -> List[str]:
+    rows = conn.execute(
+        "SELECT label, rowid FROM folder_watch_labels "
+        "WHERE folder_watch_id = ? ORDER BY rowid",
+        (folder_watch_id,),
+    ).fetchall()
+    return [r["label"] for r in rows]
+
+
+def _row_to_folder_watch(conn: sqlite3.Connection, row: sqlite3.Row) -> dict:
+    result = dict(row)
+    result["labels"] = _get_folder_watch_labels(conn, result["id"])
+    result["active"] = bool(result.get("active"))
+    return result
+
+
 def _row_to_file(conn: sqlite3.Connection, row: sqlite3.Row) -> dict:
     result = dict(row)
     result["labels"] = _get_file_labels(conn, result["id"])
@@ -683,6 +758,226 @@ def get_file_chunk_count() -> int:
     try:
         row = conn.execute("SELECT COALESCE(SUM(chunk_count), 0) as cnt FROM files").fetchone()
         return row["cnt"]
+    finally:
+        conn.close()
+
+
+# ─── Folder Watch CRUD ─────────────────────────────────────────────
+
+
+def add_folder_watch(path: str, labels: List[str]) -> dict:
+    """Create or reactivate a recursive folder watch."""
+    clean_path = os.path.abspath(os.path.expanduser((path or "").strip()))
+    merged = _normalize_labels(labels)
+    primary = merged[0] if merged else ""
+    now = _now_iso()
+    conn = _get_conn()
+    try:
+        existing = conn.execute(
+            "SELECT * FROM folder_watches WHERE path = ?",
+            (clean_path,),
+        ).fetchone()
+        if existing is None:
+            cur = conn.execute(
+                "INSERT INTO folder_watches "
+                "(path, label, status, active, error_message, created_at, updated_at) "
+                "VALUES (?, ?, 'starting', 1, NULL, ?, ?)",
+                (clean_path, primary, now, now),
+            )
+            watch_id = cur.lastrowid
+        else:
+            watch_id = existing["id"]
+            conn.execute(
+                "UPDATE folder_watches SET label=?, status='starting', active=1, "
+                "error_message=NULL, updated_at=? WHERE id=?",
+                (primary, now, watch_id),
+            )
+        _set_folder_watch_labels(conn, watch_id, merged)
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM folder_watches WHERE id = ?",
+            (watch_id,),
+        ).fetchone()
+        return _row_to_folder_watch(conn, row)
+    finally:
+        conn.close()
+
+
+def list_folder_watches() -> List[dict]:
+    """List configured folder watches, newest first."""
+    conn = _get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM folder_watches ORDER BY created_at DESC",
+        ).fetchall()
+        return [_row_to_folder_watch(conn, r) for r in rows]
+    finally:
+        conn.close()
+
+
+def get_folder_watch(watch_id: int) -> Optional[dict]:
+    """Get a watched folder by ID."""
+    conn = _get_conn()
+    try:
+        row = conn.execute(
+            "SELECT * FROM folder_watches WHERE id = ?",
+            (watch_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return _row_to_folder_watch(conn, row)
+    finally:
+        conn.close()
+
+
+def update_folder_watch(
+    watch_id: int,
+    status: Optional[str] = None,
+    active: Optional[bool] = None,
+    error_message: Optional[str] = None,
+    process_id: Optional[int] = None,
+    last_scan_at: Optional[str] = None,
+    files_indexed: Optional[int] = None,
+    increment_restart: bool = False,
+) -> Optional[dict]:
+    """Update folder watch runtime status fields."""
+    assignments = ["updated_at = ?"]
+    values: list[Any] = [_now_iso()]
+    if status is not None:
+        assignments.append("status = ?")
+        values.append(status)
+    if active is not None:
+        assignments.append("active = ?")
+        values.append(int(active))
+    if error_message is not None:
+        assignments.append("error_message = ?")
+        values.append(error_message)
+    if process_id is not None:
+        assignments.append("process_id = ?")
+        values.append(process_id)
+    if last_scan_at is not None:
+        assignments.append("last_scan_at = ?")
+        values.append(last_scan_at)
+    if files_indexed is not None:
+        assignments.append("files_indexed = ?")
+        values.append(files_indexed)
+    if increment_restart:
+        assignments.append("restart_count = COALESCE(restart_count, 0) + 1")
+    values.append(watch_id)
+
+    conn = _get_conn()
+    try:
+        conn.execute(
+            f"UPDATE folder_watches SET {', '.join(assignments)} WHERE id = ?",
+            values,
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM folder_watches WHERE id = ?",
+            (watch_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return _row_to_folder_watch(conn, row)
+    finally:
+        conn.close()
+
+
+def stop_folder_watch(watch_id: int, message: str = "") -> Optional[dict]:
+    """Mark a watched folder inactive without deleting its history."""
+    now = _now_iso()
+    conn = _get_conn()
+    try:
+        conn.execute(
+            "UPDATE folder_watches SET active=0, status='stopped', process_id=NULL, "
+            "error_message=?, updated_at=? WHERE id=?",
+            (message or None, now, watch_id),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM folder_watches WHERE id = ?",
+            (watch_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return _row_to_folder_watch(conn, row)
+    finally:
+        conn.close()
+
+
+def delete_folder_watch(watch_id: int) -> Optional[dict]:
+    """Delete a watched folder definition. Uploaded file records remain."""
+    conn = _get_conn()
+    try:
+        row = conn.execute(
+            "SELECT * FROM folder_watches WHERE id = ?",
+            (watch_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        result = _row_to_folder_watch(conn, row)
+        conn.execute("DELETE FROM folder_watches WHERE id = ?", (watch_id,))
+        conn.commit()
+        return result
+    finally:
+        conn.close()
+
+
+def set_folder_watch_file(
+    folder_watch_id: int,
+    path: str,
+    file_id: Optional[int],
+    content_sha256: Optional[str],
+    file_size: int,
+    mtime_ns: int,
+    status: str = "completed",
+    error_message: Optional[str] = None,
+    retry_after: Optional[str] = None,
+) -> dict:
+    """Upsert state for one file observed by a folder watcher."""
+    now = _now_iso()
+    clean_path = os.path.abspath(os.path.expanduser(path))
+    conn = _get_conn()
+    try:
+        conn.execute(
+            "INSERT INTO folder_watch_files "
+            "(folder_watch_id, path, file_id, content_sha256, file_size, mtime_ns, "
+            "status, error_message, last_seen_at, last_ingested_at, retry_after) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(folder_watch_id, path) DO UPDATE SET "
+            "file_id=excluded.file_id, content_sha256=excluded.content_sha256, "
+            "file_size=excluded.file_size, mtime_ns=excluded.mtime_ns, "
+            "status=excluded.status, error_message=excluded.error_message, "
+            "last_seen_at=excluded.last_seen_at, "
+            "last_ingested_at=CASE WHEN excluded.status='completed' THEN excluded.last_ingested_at "
+            "ELSE folder_watch_files.last_ingested_at END, "
+            "retry_after=excluded.retry_after",
+            (
+                folder_watch_id, clean_path, file_id, content_sha256, file_size,
+                mtime_ns, status, error_message, now,
+                now if status == "completed" else None, retry_after,
+            ),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM folder_watch_files WHERE folder_watch_id = ? AND path = ?",
+            (folder_watch_id, clean_path),
+        ).fetchone()
+        return dict(row)
+    finally:
+        conn.close()
+
+
+def get_folder_watch_file(folder_watch_id: int, path: str) -> Optional[dict]:
+    """Return stored state for a watched file path."""
+    clean_path = os.path.abspath(os.path.expanduser(path))
+    conn = _get_conn()
+    try:
+        row = conn.execute(
+            "SELECT * FROM folder_watch_files WHERE folder_watch_id = ? AND path = ?",
+            (folder_watch_id, clean_path),
+        ).fetchone()
+        return dict(row) if row is not None else None
     finally:
         conn.close()
 

@@ -139,6 +139,10 @@
   .badge-pending{background:rgba(210,153,34,0.14);color:#e3b341;}
   .badge-failed{background:rgba(248,81,73,0.14);color:#ff7b72;}
   .badge-crawling{background:rgba(88,166,255,0.14);color:#79b8ff;}
+  .badge-running{background:rgba(88,166,255,0.14);color:#79b8ff;}
+  .badge-starting,.badge-restarting{background:rgba(210,153,34,0.14);color:#e3b341;}
+  .badge-stopped{background:rgba(139,148,158,0.14);color:#c9d1d9;}
+  .badge-skipped{background:rgba(139,148,158,0.14);color:#c9d1d9;}
 
   /* ── Tables ── */
   .table-scroll{max-height:480px;overflow-y:auto;border:1px solid var(--border);border-radius:10px;}
@@ -405,6 +409,7 @@
     <button class="tab-btn active" data-tab="search"    onclick="switchTab('search')">🔎 Search</button>
     <button class="tab-btn"        data-tab="urls"      onclick="switchTab('urls')">🔗 URLs</button>
     <button class="tab-btn"        data-tab="documents" onclick="switchTab('documents')">📄 Documents</button>
+    <button class="tab-btn"        data-tab="folders"   onclick="switchTab('folders')">📁 Folders</button>
     <button class="tab-btn"        data-tab="config"    onclick="switchTab('config')">⚙️ Config</button>
     <button class="tab-btn"        data-tab="api"       onclick="switchTab('api')">📋 API &amp; MCP</button>
   </nav>
@@ -547,6 +552,46 @@
     </div>
   </div>
 
+  <!-- ══ Folders ══ -->
+  <div class="tab-section" data-section="folders">
+    <section class="card card-pad mb-4">
+      <div class="section-title">Watch Folder</div>
+      <div class="flex flex-wrap gap-2 items-end">
+        <input type="text" id="folderPath" placeholder="C:\Docs\Knowledge Base"
+               class="field flex-[2] min-w-[220px]" onkeydown="if(event.key==='Enter')addFolderWatch()">
+        <input type="text" id="folderLabels" placeholder="Labels (required, comma-separated)"
+               class="field flex-1 min-w-[160px]"
+               oninput="this.classList.remove('field-error')" onkeydown="if(event.key==='Enter')addFolderWatch()">
+        <button id="addFolderBtn" onclick="addFolderWatch()" class="btn btn-primary flex-shrink-0">+ Watch</button>
+      </div>
+      <div class="help mt-1.5">Scans the folder and subfolders for PDF, DOCX, TXT, MD, HTML, CSV, and JSON files.</div>
+      <div class="help mt-1" id="folderAllowedRoots">Allowed roots: loading…</div>
+      <div id="folderMsg" class="status-msg mt-2"></div>
+    </section>
+    <div class="table-scroll mt-3">
+      <table id="folderTable" class="url-table">
+        <colgroup>
+          <col style="width:34%"><col style="width:15%"><col style="width:9%">
+          <col style="width:8%"><col style="width:14%"><col style="width:14%"><col style="width:90px">
+        </colgroup>
+        <thead>
+          <tr>
+            <th data-key="path"    onclick="sortFolders('path')">Folder<span class="sort-ind">↕</span></th>
+            <th data-key="labels"  onclick="sortFolders('labels')">Labels<span class="sort-ind">↕</span></th>
+            <th data-key="status"  onclick="sortFolders('status')">Status<span class="sort-ind">↕</span></th>
+            <th data-key="files"   onclick="sortFolders('files')" class="col-num">Files<span class="sort-ind">↕</span></th>
+            <th data-key="scan"    onclick="sortFolders('scan')">Last scan<span class="sort-ind">↕</span></th>
+            <th data-key="error"   onclick="sortFolders('error')">Message<span class="sort-ind">↕</span></th>
+            <th class="col-act"></th>
+          </tr>
+        </thead>
+        <tbody id="folderTbody">
+          <tr><td colspan="7" class="empty-state">Loading…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
   <!-- ══ Config ══ -->
   <div class="tab-section" data-section="config">
     <section class="card card-pad mb-5">
@@ -613,7 +658,7 @@
   <div class="tab-section" data-section="api">
     <section class="card card-pad mb-4">
       <div class="section-title">
-        API Endpoints <span class="text-muted" style="font-weight:400;font-size:0.78rem;margin-left:0.25rem">(17)</span>
+        API Endpoints <span class="text-muted" style="font-weight:400;font-size:0.78rem;margin-left:0.25rem">(23)</span>
         <span class="section-actions">
           <a class="btn btn-primary btn-sm" href="/swagger" target="_blank" rel="noopener">Open Swagger UI</a>
         </span>
@@ -633,6 +678,12 @@
         <div class="api-row"><span class="method post">POST</span><span class="api-path">/files</span><span class="api-desc">Upload document (multipart: file + labels; duplicate content returns 409)</span></div>
         <div class="api-row"><span class="method get">GET</span><span class="api-path">/files</span><span class="api-desc">List uploaded files with labels and chunk counts</span></div>
         <div class="api-row"><span class="method del">DEL</span><span class="api-path">/files/{id}</span><span class="api-desc">Delete file and its vectors from Qdrant</span></div>
+        <div class="api-row"><span class="method post">POST</span><span class="api-path">/folders</span><span class="api-desc">Watch a folder recursively and ingest allowed files automatically</span></div>
+        <div class="api-row"><span class="method get">GET</span><span class="api-path">/folders</span><span class="api-desc">List watched folders and watcher status</span></div>
+        <div class="api-row"><span class="method get">GET</span><span class="api-path">/folders/allowed-roots</span><span class="api-desc">List filesystem roots accepted for folder watching</span></div>
+        <div class="api-row"><span class="method post">POST</span><span class="api-path">/folders/{id}/restart</span><span class="api-desc">Restart a stopped or failed watcher</span></div>
+        <div class="api-row"><span class="method post">POST</span><span class="api-path">/folders/{id}/stop</span><span class="api-desc">Stop watching a folder without deleting ingested files</span></div>
+        <div class="api-row"><span class="method del">DEL</span><span class="api-path">/folders/{id}</span><span class="api-desc">Remove a watcher definition</span></div>
         <div class="api-row"><span class="method get">GET</span><span class="api-path">/config</span><span class="api-desc">Get all configuration values</span></div>
         <div class="api-row"><span class="method put">PUT</span><span class="api-path">/config</span><span class="api-desc">Update configuration (label_match_mode: hard|boost, weight 0–1)</span></div>
         <div class="api-row mcp-divider"><span class="method mcp">MCP</span><span class="api-path">/mcp</span><span class="api-desc">list_labels, search_docs, add_url_to_crawl, trigger_crawl, recrawl_url, get_chunks_for_url, get_adjacent_chunks, upload_file, delete_file, list_files</span></div>
@@ -792,6 +843,7 @@ function switchTab(name){
   document.querySelectorAll('.tab-section').forEach(s=>s.classList.toggle('active',s.dataset.section===name));
   if(name==='urls') loadUrls();
   if(name==='documents') loadFiles();
+  if(name==='folders'){loadFolders();loadFolderAllowedRoots();}
 }
 
 // ── Files ─────────────────────────────────────────────────────────
@@ -886,6 +938,95 @@ async function bulkDeleteFiles(){
   _selectedFiles.clear();
   _flashMsg(document.getElementById('fileMsg'),`${done} deleted${failed?`, ${failed} failed`:''}`,failed?'err':'ok');
   await loadSummary();await loadFiles();
+}
+
+// ── Folders ───────────────────────────────────────────────────────
+let _foldersSortKey=null,_foldersSortAsc=true,_foldersData=[];
+function sortFolders(key){_foldersSortKey===key?_foldersSortAsc=!_foldersSortAsc:(_foldersSortKey=key,_foldersSortAsc=true);_renderFolderTable();}
+async function loadFolders(){try{_foldersData=await (await fetch('/folders')).json();_renderFolderTable();}catch(e){}}
+async function loadFolderAllowedRoots(){
+  const el=document.getElementById('folderAllowedRoots');
+  if(!el) return;
+  try{
+    const d=await (await fetch('/folders/allowed-roots')).json();
+    const roots=(d.roots||[]).join(', ');
+    el.textContent=roots?`Allowed roots: ${roots}`:'Folder watching disabled: no allowed roots configured';
+  }catch(e){el.textContent='Allowed roots unavailable';}
+}
+function _renderFolderTable(){
+  const tbody=document.getElementById('folderTbody');
+  if(!tbody) return;
+  let data=[..._foldersData];
+  if(_foldersSortKey){
+    const k=_foldersSortKey;
+    data.sort((a,b)=>{
+      let va,vb;
+      if(k==='path'){va=a.path||'';vb=b.path||'';}
+      else if(k==='labels'){va=(a.labels||[]).join(',');vb=(b.labels||[]).join(',');}
+      else if(k==='status'){va=a.status||'';vb=b.status||'';}
+      else if(k==='files'){va=a.files_indexed||0;vb=b.files_indexed||0;}
+      else if(k==='scan'){va=a.last_scan_at||'';vb=b.last_scan_at||'';}
+      else if(k==='error'){va=a.error_message||'';vb=b.error_message||'';}
+      else return 0;
+      if(typeof va==='number'){const c=va<vb?-1:va>vb?1:0;return _foldersSortAsc?c:-c;}
+      return _foldersSortAsc?String(va).localeCompare(String(vb)):String(vb).localeCompare(String(va));
+    });
+  }
+  tbody.closest('table')?.querySelectorAll('thead th[data-key]').forEach(th=>{
+    th.classList.toggle('sorted',th.dataset.key===_foldersSortKey);
+    const ind=th.querySelector('.sort-ind');
+    if(ind) ind.textContent=th.dataset.key===_foldersSortKey?(_foldersSortAsc?'▲':'▼'):'↕';
+  });
+  if(!data.length){tbody.innerHTML='<tr><td colspan="7" class="empty-state"><span class="icon">📁</span>No folders watched yet</td></tr>';return;}
+  tbody.innerHTML=data.map(f=>{
+    const labels=(f.labels||[]).map(l=>`<span class="chip" style="font-size:0.7rem;padding:0.08rem 0.38rem">${esc(l)}</span>`).join(' ');
+    const msg=f.error_message?esc(trunc(f.error_message,90)):'<span class="text-muted">—</span>';
+    const scan=f.last_scan_at?_fmtFileDate(f.last_scan_at):'—';
+    const canRestart=f.status==='failed'||f.status==='stopped'||!f.active;
+    return `<tr>
+      <td class="mono" title="${esc(f.path)}" style="max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(f.path)}</td>
+      <td>${labels||'<span class="text-muted">—</span>'}</td>
+      <td><span class="badge badge-${esc(f.status||'stopped')}">${esc(f.status||'stopped')}</span></td>
+      <td class="col-num">${f.files_indexed??0}</td>
+      <td class="text-muted" style="font-size:0.75rem;white-space:nowrap">${scan}</td>
+      <td class="text-muted" style="font-size:0.75rem" title="${esc(f.error_message||'')}">${msg}</td>
+      <td class="col-act">
+        ${canRestart?`<button class="btn btn-ghost btn-sm btn-icon" onclick="restartFolder(${f.id})" title="Restart">↺</button>`:`<button class="btn btn-ghost btn-sm btn-icon" onclick="stopFolder(${f.id})" title="Stop">■</button>`}
+        <button class="btn btn-danger btn-sm btn-icon" onclick="deleteFolder(${f.id})" title="Delete watcher">🗑</button>
+      </td>
+    </tr>`;
+  }).join('');
+}
+async function addFolderWatch(){
+  const pathEl=document.getElementById('folderPath'),labelsEl=document.getElementById('folderLabels');
+  const btn=document.getElementById('addFolderBtn'),msgEl=document.getElementById('folderMsg');
+  const path=pathEl.value.trim(),labels=_splitLabels(labelsEl.value);
+  if(!path){_flashMsg(msgEl,'Folder path is required.','warn');return;}
+  if(!labels.length){labelsEl.classList.add('field-error');_flashMsg(msgEl,'At least one label is required.','warn');return;}
+  labelsEl.classList.remove('field-error');
+  const orig=btn.innerHTML;btn.disabled=true;btn.innerHTML='<span class="spinner"></span> Starting…';
+  try{
+    const r=await fetch('/folders',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path,labels})});
+    const d=await r.json();
+    if(!r.ok){_flashMsg(msgEl,d.detail||'Could not watch folder','err');return;}
+    pathEl.value='';labelsEl.value='';
+    _flashMsg(msgEl,'Folder watcher started','ok');
+    await loadFolders();
+  }catch(e){_flashMsg(msgEl,'Network error: '+e.message,'err');}
+  finally{btn.disabled=false;btn.innerHTML=orig;}
+}
+async function stopFolder(id){
+  try{const r=await fetch(`/folders/${id}/stop`,{method:'POST'});if(!r.ok){const d=await r.json();alert(d.detail||'Stop failed');}await loadFolders();}
+  catch(e){alert('Network error: '+e.message);}
+}
+async function restartFolder(id){
+  try{const r=await fetch(`/folders/${id}/restart`,{method:'POST'});if(!r.ok){const d=await r.json();alert(d.detail||'Restart failed');}await loadFolders();}
+  catch(e){alert('Network error: '+e.message);}
+}
+async function deleteFolder(id){
+  if(!confirm('Remove this watcher? Already indexed documents remain available.')) return;
+  try{const r=await fetch(`/folders/${id}`,{method:'DELETE'});if(!r.ok){const d=await r.json();alert(d.detail||'Delete failed');}await loadFolders();}
+  catch(e){alert('Network error: '+e.message);}
 }
 
 // ── Flash messages ────────────────────────────────────────────────

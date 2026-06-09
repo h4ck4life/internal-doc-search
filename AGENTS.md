@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-This is a Python FastAPI service for crawling, indexing, and searching internal documentation. Core modules live at the repository root: `api.py` exposes HTTP endpoints and the web UI, `mcp_server.py` exposes MCP tools, `ingest.py` handles crawling, `chunker.py` splits documents, `search_utils.py` ranks results, and `store.py` manages SQLite state. Runtime configuration and model loading are in `shared.py`.
+This is a Python FastAPI service for crawling, indexing, and searching internal documentation. Core modules live at the repository root: `api.py` exposes HTTP endpoints and the web UI, `mcp_server.py` exposes MCP tools, `ingest.py` handles crawling, `file_processor.py` ingests uploaded and watched files, `folder_watcher.py` supervises recursive folder watches, `chunker.py` splits documents, `search_utils.py` ranks results, and `store.py` manages SQLite state. Runtime configuration and model loading are in `shared.py`.
 
 Tests are in `tests/` and usually mirror the module under test, for example `tests/test_store.py` and `tests/test_api.py`. Static browser assets live in `static/`. OpenSpec notes and specs are under `openspec/`.
 

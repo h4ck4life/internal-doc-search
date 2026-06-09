@@ -460,10 +460,16 @@ def test_delete_url(client):
     """DELETE /urls/{id} removes URL."""
     created = client.post("/urls", json={"url": "https://example.com", "label": "Docs"}).json()
 
-    response = client.delete(f"/urls/{created['id']}")
+    mock_client = MagicMock()
+    mock_client.delete = AsyncMock()
+    mock_client.close = AsyncMock()
+    with patch("api.AsyncQdrantClient", return_value=mock_client):
+        response = client.delete(f"/urls/{created['id']}")
+
     assert response.status_code == 200
     assert response.json()["deleted"] is True
     assert response.json()["affected_urls"] == 1
+    mock_client.delete.assert_awaited_once()
 
     # Verify it's gone
     response = client.get("/urls")

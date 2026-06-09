@@ -129,6 +129,10 @@ services:
       - "8000:8000"
     volumes:
       - ./data:/app/data
+      # Host home directory is exposed read-only for folder watching.
+      # Add watchers using the container path, for example /watched/home/Documents.
+      # Set FOLDER_WATCH_HOST_ROOT before docker compose up to expose another root.
+      - ${FOLDER_WATCH_HOST_ROOT:-~}:/watched/home:ro
       # Playwright Chromium and HuggingFace models are baked into the
       # image — no host bind mount for /app/.cache is needed.
     environment:
@@ -153,6 +157,10 @@ services:
       - CRAWL_OVERRIDE_NAVIGATOR=false
       - CRAWL_DEEP_MAX_PAGES=500
       - CRAWL_USER_AGENT_MODE=random
+      - FOLDER_WATCH_ALLOWED_ROOTS=/watched/home
+      - FOLDER_WATCH_SCAN_INTERVAL=5
+      - FOLDER_WATCH_DEBOUNCE_SECONDS=2
+      - FOLDER_WATCH_MAX_FILES_PER_SCAN=10
     shm_size: '2gb'
 
 volumes:

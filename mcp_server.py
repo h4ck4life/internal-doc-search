@@ -8,6 +8,8 @@ Tools:
   - trigger_crawl: Start background re-ingestion
   - get_chunks_for_url: Fetch all chunks from a specific URL (paginated)
   - get_adjacent_chunks: Fetch surrounding chunks for context exploration
+  - watch_folder: Add a recursive local folder watcher
+  - list_watched_folders: List configured folder watchers
 
 Run: `fastmcp run mcp_server.py` (standalone) or mounted in FastAPI via `mcp.http_app()`
 """
@@ -54,6 +56,8 @@ def _ensure_imports():
     global init_db, list_urls, add_url, get_config, validate_url_input
     global _store_list_files, _store_delete_file, _store_get_file, _store_add_file
     global _store_get_file_by_digest
+    global _store_add_folder_watch, _store_list_folder_watches, _store_get_folder_watch
+    global _store_stop_folder_watch
     global DuplicateFileError
     from qdrant_client import AsyncQdrantClient, models  # noqa: F811
     from store import (  # noqa: F811
@@ -66,6 +70,10 @@ def _ensure_imports():
     _store_get_file = _store.get_file
     _store_add_file = _store.add_file
     _store_get_file_by_digest = _store.get_file_by_digest
+    _store_add_folder_watch = _store.add_folder_watch
+    _store_list_folder_watches = _store.list_folder_watches
+    _store_get_folder_watch = _store.get_folder_watch
+    _store_stop_folder_watch = _store.stop_folder_watch
     _imports_loaded = True
 
 
@@ -985,3 +993,110 @@ async def list_files(limit: int = 50, offset: int = 0) -> dict:
     total = _store_get_file_count()
 
     return {"files": files, "total": total}
+
+
+# ─── Folder Watch Tools ────────────────────────────────────────────
+
+
+@mcp.tool()
+async def watch_folder(
+    folder_path: str,
+    labels: list[str],
+) -> dict:
+    """Watch a local folder recursively and automatically ingest allowed files.
+
+    The watcher monitors the folder and all subfolders. New or modified PDF,
+    DOCX, TXT, MD, HTML, CSV, and JSON files are uploaded and ingested
+    automatically. The watcher runs outside the main API thread in a separate
+    Python process supervised by the API service.
+
+    Args:
+        folder_path: Absolute or relative path to an existing local folder.
+        labels: Labels applied to files ingested from this folder. At least one
+            label is required.
+
+    Returns:
+        The watched folder record with id, path, labels, status, active flag,
+        process_id, restart_count, files_indexed, and error_message.
+    """
+    _ensure_imports()
+
+    from folder_watcher import normalize_allowed_folder_path
+
+    clean_path, path_error = normalize_allowed_folder_path(folder_path)
+    if path_error:
+        return {"error": path_error}
+    if not os.path.isdir(clean_path):
+        return {"error": f"Folder does not exist: {clean_path}"}
+    if not os.access(clean_path, os.R_OK):
+        return {"error": f"Folder is not readable: {clean_path}"}
+
+    clean_labels = [str(label).strip() for label in (labels or []) if str(label).strip()]
+    if not clean_labels:
+        return {"error": "At least one label is required."}
+
+    init_db()  # noqa: F811
+    record = _store_add_folder_watch(clean_path, clean_labels)
+
+    from folder_watcher import ensure_watch_running
+    ensure_watch_running(record["id"])
+
+    return record
+
+
+@mcp.tool()
+async def list_watched_folders() -> dict:
+    """List configured recursive folder watchers and their current status.
+
+    Use this to see which folders are active, failed, stopped, restarting, or
+    reporting errors such as missing paths or permission loss.
+
+    Returns:
+        Dict with "folders" list and "total" count. Each folder includes id,
+        path, labels, status, active, process_id, restart_count, files_indexed,
+        error_message, last_scan_at, created_at, and updated_at.
+    """
+    _ensure_imports()
+    folders = _store_list_folder_watches()
+    return {"folders": folders, "total": len(folders)}
+
+
+@mcp.tool()
+async def stop_watching_folder(folder_watch_id: int) -> dict:
+    """Stop a folder watcher without deleting files already ingested from it."""
+    _ensure_imports()
+    existing = _store_get_folder_watch(folder_watch_id)
+    if existing is None:
+        return {"error": f"Folder watch with id={folder_watch_id} not found."}
+
+    from folder_watcher import stop_watch_process
+
+    record = _store_stop_folder_watch(folder_watch_id)
+    stop_watch_process(folder_watch_id)
+    return record
+
+
+@mcp.tool()
+async def restart_watched_folder(folder_watch_id: int) -> dict:
+    """Restart a stopped or failed folder watcher."""
+    _ensure_imports()
+    existing = _store_get_folder_watch(folder_watch_id)
+    if existing is None:
+        return {"error": f"Folder watch with id={folder_watch_id} not found."}
+    from folder_watcher import normalize_allowed_folder_path
+    _clean_path, path_error = normalize_allowed_folder_path(existing["path"])
+    if path_error:
+        return {"error": path_error}
+    if not os.path.isdir(existing["path"]):
+        return {"error": f"Folder does not exist: {existing['path']}"}
+    if not os.access(existing["path"], os.R_OK):
+        return {"error": f"Folder is not readable: {existing['path']}"}
+
+    from store import update_folder_watch
+    from folder_watcher import ensure_watch_running
+
+    record = update_folder_watch(
+        folder_watch_id, status="starting", active=True, error_message="",
+    )
+    ensure_watch_running(folder_watch_id)
+    return record

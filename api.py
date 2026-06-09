@@ -49,6 +49,11 @@ from store import (
     get_file_count,
     get_file_chunk_count,
     get_file_by_digest,
+    add_folder_watch,
+    list_folder_watches,
+    get_folder_watch,
+    stop_folder_watch,
+    delete_folder_watch,
 )
 
 from search_utils import (
@@ -69,7 +74,11 @@ async def app_lifespan(app: FastAPI):
     )
     _load_models()
     init_db()
+    from folder_watcher import start_supervisor
+    start_supervisor()
     yield
+    from folder_watcher import stop_supervisor
+    stop_supervisor(timeout=15)
     # Graceful shutdown: signal ingest thread to stop, then join
     _ingest_stop_event.set()
     t = get_ingest_thread()
@@ -168,6 +177,12 @@ class URLUpdate(BaseModel):
     deep_crawl_max_depth: Optional[int] = None
     deep_crawl_url_pattern: Optional[str] = None
     deep_crawl_exclude_pattern: Optional[str] = None
+
+
+class FolderWatchInput(BaseModel):
+    path: str
+    label: str = ""
+    labels: list[str] = []
 
 
 def _yaml_scalar(value: Any) -> str:
@@ -874,6 +889,102 @@ async def bulk_delete_files_endpoint(body: dict):
     finally:
         await client.close()
     return results
+
+
+# ─── Folder watch management ───────────────────────────────────────
+
+
+@app.post("/folders", status_code=201)
+async def create_folder_watch(body: FolderWatchInput):
+    """Add a recursive folder watch for automatic file ingestion."""
+    from folder_watcher import normalize_allowed_folder_path
+
+    folder_path, path_error = normalize_allowed_folder_path(body.path)
+    if path_error:
+        raise HTTPException(status_code=400, detail=path_error)
+    if not os.path.isdir(folder_path):
+        raise HTTPException(status_code=400, detail="Folder does not exist.")
+    if not os.access(folder_path, os.R_OK):
+        raise HTTPException(status_code=403, detail="Folder is not readable.")
+
+    label_list = body.labels or [lbl.strip() for lbl in body.label.split(",") if lbl.strip()]
+    if not label_list:
+        raise HTTPException(status_code=400, detail="At least one label is required.")
+
+    try:
+        record = add_folder_watch(folder_path, label_list)
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+    from folder_watcher import ensure_watch_running
+    ensure_watch_running(record["id"])
+    return record
+
+
+@app.get("/folders")
+async def get_folder_watches():
+    """List watched folders and their current watcher status."""
+    return list_folder_watches()
+
+
+@app.get("/folders/allowed-roots")
+async def get_folder_watch_allowed_roots():
+    """Return folder roots accepted by the folder watcher."""
+    from folder_watcher import get_allowed_roots
+    return {"roots": get_allowed_roots()}
+
+
+@app.post("/folders/{folder_id}/restart")
+async def restart_folder_watch_endpoint(folder_id: int):
+    """Restart a stopped or failed folder watcher."""
+    existing = get_folder_watch(folder_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Folder watch not found")
+    from folder_watcher import normalize_allowed_folder_path
+    _folder_path, path_error = normalize_allowed_folder_path(existing["path"])
+    if path_error:
+        raise HTTPException(status_code=400, detail=path_error)
+    if not os.path.isdir(existing["path"]):
+        raise HTTPException(status_code=400, detail="Folder does not exist.")
+    if not os.access(existing["path"], os.R_OK):
+        raise HTTPException(status_code=403, detail="Folder is not readable.")
+
+    from store import update_folder_watch
+    from folder_watcher import ensure_watch_running
+
+    record = update_folder_watch(
+        folder_id, status="starting", active=True, error_message="",
+    )
+    ensure_watch_running(folder_id)
+    return record
+
+
+@app.post("/folders/{folder_id}/stop")
+async def stop_folder_watch_endpoint(folder_id: int):
+    """Stop watching a folder without deleting its indexed files."""
+    existing = get_folder_watch(folder_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Folder watch not found")
+
+    from folder_watcher import stop_watch_process
+
+    record = stop_folder_watch(folder_id)
+    stop_watch_process(folder_id)
+    return record
+
+
+@app.delete("/folders/{folder_id}")
+async def delete_folder_watch_endpoint(folder_id: int):
+    """Remove a watched folder definition. Indexed files remain in Documents."""
+    existing = get_folder_watch(folder_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Folder watch not found")
+
+    from folder_watcher import stop_watch_process
+
+    stop_watch_process(folder_id)
+    record = delete_folder_watch(folder_id)
+    return {"deleted": True, "folder_id": folder_id, "path": record["path"]}
 
 
 # MCP mount at /mcp with path='/' in the sub-app. Starlette strips the

@@ -1,8 +1,8 @@
 # Recall 🔍
 
-Semantic search for your internal documentation. Crawls JS-heavy SPA doc sites, chunks with token-aware boundaries, enriches with structural metadata, embeds with a QA-tuned model, stores in Qdrant, and serves results via a FastAPI with two-stage retrieval (bi-encoder recall → cross-encoder rerank → sigmoid normalization) plus source diversity.
+Semantic search for your internal documentation. Crawls JS-heavy SPA doc sites, ingests uploaded documents and watched folders, chunks with token-aware boundaries, enriches with structural metadata, embeds with a QA-tuned model, stores in Qdrant, and serves results via a FastAPI with two-stage retrieval (bi-encoder recall → cross-encoder rerank → sigmoid normalization) plus source diversity.
 
-Also exposes an **MCP endpoint** with 10 tools so Claude Code, Claude Desktop, Codex, and other LLM agents can search docs, discover topics, explore surrounding context, add URLs, and trigger crawling directly.
+Also exposes an **MCP endpoint** with 14 tools so Claude Code, Claude Desktop, Codex, and other LLM agents can search docs, discover topics, explore surrounding context, add URLs, upload files, watch folders, and trigger crawling directly.
 
 ## Architecture
 
@@ -15,9 +15,13 @@ JS SPA Docs → Crawl4AI (Playwright, --ignore-certificate-errors) → fit_markd
     → FastAPI /search → Cross-encoder rerank → Source diversity → Low-CE hints
 
 LLM/Agent → MCP /mcp/ → list_labels() / search_docs() / get_chunks_for_url() /
-    get_adjacent_chunks() / add_url_to_crawl() / trigger_crawl()
+    get_adjacent_chunks() / add_url_to_crawl() / upload_file() / watch_folder()
+
+Local files → Documents upload or recursive folder watcher subprocess
+    → shared file processor → Chunk → Embed → Qdrant
     
 Ingestion: background thread (threading.Thread) — never blocks the API event loop
+Folder watching: supervisor thread + one Python subprocess per active folder watch
 ```
 
 ## Quick Start
@@ -54,6 +58,27 @@ curl -X POST http://localhost:8000/urls \
 ```
 
 **Bulk import**: Edit `urls.txt` (one URL per line, `#` for comments) and run `python ingest.py`. The CLI reads from `urls.txt` directly.
+
+### 3b. Add files or watched folders
+
+Use the **Documents** tab to upload individual files, or the **Folders** tab to monitor a local folder recursively. Watched folders automatically ingest supported new or modified files.
+
+```bash
+# Upload one document
+curl -X POST http://localhost:8000/files \
+  -F "file=@./docs/guide.txt" \
+  -F "labels=Docs, API"
+
+# Watch a folder and all subfolders
+curl -X POST http://localhost:8000/folders \
+  -H "Content-Type: application/json" \
+  -d '{"path": "C:\\Docs\\Knowledge Base", "labels": ["Docs"]}'
+
+# List watched folders
+curl http://localhost:8000/folders
+```
+
+Supported file types: PDF, DOCX, TXT, MD, HTML/HTM, CSV, and JSON. Files are limited to 50 MB. Folder paths are resolved on the machine/container running the API server. By default, local non-container runs allow watches under the API process user's home directory. Docker Compose mounts the host home directory at `/watched/home`, so Docker users should select paths under `/watched/home`.
 
 ### 4. Run ingestion
 
@@ -97,13 +122,15 @@ The Recall web dashboard at `http://localhost:8000/` provides:
 - **Search** — Full-text semantic search with label chip filter (type to autocomplete, prefix with `-` to exclude)
 - **Crawl buttons** — "Crawl Pending" (pending/failed only) and "Recrawl All" (everything)
 - **URLs table** — Add/edit/delete crawl URLs, configure deep crawl with include/exclude patterns
+- **Documents table** — Upload supported files, inspect status/chunk counts, and delete indexed documents
+- **Folders table** — Add recursive folder watches, view watcher status/errors, restart/stop/remove watchers
 - **Configuration** — Chunk size, overlap, search limit, rerank pool, label match mode (hard/boost), boost weight
-- **API Endpoints reference** — All 17 endpoints documented
+- **API Endpoints reference** — All 23 endpoints documented
 - **MCP Setup guide** — Claude Code, Claude Desktop, and custom client configuration
 
 ## MCP Endpoint — LLM Integration
 
-The server exposes an **MCP (Model Context Protocol)** endpoint at `/mcp/`. LLM agents can call 10 tools.
+The server exposes an **MCP (Model Context Protocol)** endpoint at `/mcp/`. LLM agents can call 14 tools.
 
 ### MCP Tools
 
@@ -115,10 +142,14 @@ The server exposes an **MCP (Model Context Protocol)** endpoint at `/mcp/`. LLM 
 | `get_adjacent_chunks(url, chunk_index, page_index, window)` | Fetch surrounding chunks — see what comes before/after a specific chunk when an answer spans boundaries |
 | `add_url_to_crawl(url, labels, deep_crawl, depth, patterns)` | Add documentation URL with multi-label and deep crawl config. Auto-registers discovered pages during deep crawl |
 | `trigger_crawl(mode)` | Start background crawl in a dedicated thread (non-blocking): `"all"` recrawls everything, `"new"` only pending/failed |
-| `recrawl_url(url)` | Re-crawl a single URL by its URL string |
-| `upload_file(filename, content_b64, labels, mime_type)` | Upload a document (PDF, DOCX, TXT, MD, HTML, CSV, JSON) for chunking and indexing |
+| `recrawl_url(url_id)` | Re-crawl a single URL by its database ID |
+| `upload_file(file_path, labels)` | Upload a local document path (PDF, DOCX, TXT, MD, HTML, CSV, JSON) for chunking and indexing |
 | `delete_file(file_id)` | Delete an uploaded file and remove its vectors from Qdrant |
 | `list_files(limit, offset)` | List all uploaded files with labels and chunk counts |
+| `watch_folder(folder_path, labels)` | Watch a local folder recursively and automatically ingest supported files |
+| `list_watched_folders()` | List watched folders with status, process ID, restart count, errors, and last scan time |
+| `stop_watching_folder(folder_watch_id)` | Stop a watcher without deleting already indexed files |
+| `restart_watched_folder(folder_watch_id)` | Restart a stopped or failed watcher |
 
 ### Using from Claude Code / LLM Agents
 
@@ -247,9 +278,19 @@ curl -s -X POST http://localhost:8000/mcp/ \
 | `POST` | `/urls` | Add new crawl URL (supports `labels` list, deep crawl config) |
 | `PUT` | `/urls/{id}` | Update URL, labels, or deep crawl settings |
 | `DELETE` | `/urls/{id}` | Remove crawl URL + cleanup Qdrant vectors |
+| `POST` | `/files` | Upload a document file for indexing |
+| `GET` | `/files` | List uploaded files with labels and chunk counts |
+| `DELETE` | `/files/{id}` | Delete an uploaded file + cleanup Qdrant vectors |
+| `POST` | `/files/bulk-delete` | Delete multiple uploaded files |
+| `POST` | `/folders` | Add a recursive folder watch |
+| `GET` | `/folders` | List watched folders and watcher status |
+| `GET` | `/folders/allowed-roots` | List filesystem roots accepted for folder watching |
+| `POST` | `/folders/{id}/restart` | Restart a stopped or failed watcher |
+| `POST` | `/folders/{id}/stop` | Stop watching a folder without deleting indexed files |
+| `DELETE` | `/folders/{id}` | Remove a watcher definition; indexed files remain |
 | `GET` | `/config` | Get all configuration values |
 | `PUT` | `/config` | Update configuration (chunk size, overlap, search limit, rerank pool, label match mode, boost weight) |
-| `MCP` | `/mcp/` | **MCP endpoint** — 10 tools: `list_labels`, `search_docs`, `get_chunks_for_url`, `get_adjacent_chunks`, `add_url_to_crawl`, `trigger_crawl`, `recrawl_url`, `upload_file`, `delete_file`, `list_files` |
+| `MCP` | `/mcp/` | **MCP endpoint** — 14 tools including search, URL crawl, file upload/list/delete, and folder watch management |
 
 ## Configuration
 
@@ -305,6 +346,17 @@ These are read at startup and override defaults. Set them in your shell or in `d
 | `QDRANT_URL` | `http://localhost:6333` | Qdrant vector DB URL. Set to `http://qdrant:6333` in Docker Compose (service name). |
 | `DATA_DIR` | `data` | Directory for the SQLite database (`config.db`). Persisted as a volume in Docker. |
 
+### Folder Watcher Tuning
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `FOLDER_WATCH_ALLOWED_ROOTS` | user home directory | Allowed root directories for folder watches. Separate multiple roots with the OS path separator (`;` on Windows, `:` on Linux/macOS). Docker Compose sets this to `/watched/home`. |
+| `FOLDER_WATCH_SCAN_INTERVAL` | `5` | Seconds between recursive scans per watched folder. |
+| `FOLDER_WATCH_DEBOUNCE_SECONDS` | `2` | Minimum file quiet time before a changed file is processed. |
+| `FOLDER_WATCH_LOCK_RETRY_SECONDS` | `30` | Delay before retrying a temporarily locked or unavailable file. |
+| `FOLDER_WATCH_MAX_FILES_PER_SCAN` | `10` | Maximum changed files processed per scan to avoid overload. |
+| `FOLDER_WATCH_MAX_RESTARTS` | `3` | Supervisor restart attempts for an unexpectedly exited watcher process. |
+
 ### Docker / Offline Mode
 
 | Variable | Default | Description |
@@ -322,6 +374,20 @@ When deep crawl is enabled, discovered pages are automatically registered as the
 - **Chunks stored under actual page URL** — search results show the correct source, not all under the seed
 - **Cascade delete** — deleting a seed URL removes all its discovered children and their Qdrant vectors
 - **Lineage visible** — `/urls` returns `parent_url_id` (null for seeds, integer for auto-discovered)
+
+## Folder Watching
+
+Folder watchers monitor a selected folder and all subfolders for supported file types. They are intended for local/shared documentation directories that change over time.
+
+- **Process model** — the API starts a supervisor thread, and each active folder watch runs in its own Python subprocess using `watchdog` for recursive filesystem events. This keeps folder notifications and file ingestion separate from the FastAPI event loop.
+- **Change handling** — new files are ingested automatically; modified files replace the previous indexed version for that path. Content SHA-256 fingerprints avoid duplicate uploads.
+- **Debounce and throughput** — recently modified files are skipped until they settle, and each queue pass processes a limited batch (`FOLDER_WATCH_MAX_FILES_PER_SCAN`) to avoid overload.
+- **Retry behavior** — temporarily locked or unavailable files are marked for retry instead of failing permanently.
+- **Unsupported files** — unsupported extensions are skipped and logged in folder-watch file state.
+- **Missing or unreadable folders** — the watcher marks the folder failed/inactive with an error message. Use restart after restoring the path or permissions.
+- **Crash recovery** — the supervisor restarts unexpectedly exited watcher subprocesses up to `FOLDER_WATCH_MAX_RESTARTS`; after that the watch is marked failed.
+
+In Docker, `folder_path` must be a path visible inside the API container. This repo's Compose files mount `${FOLDER_WATCH_HOST_ROOT:-~}` to `/watched/home` read-only and set `FOLDER_WATCH_ALLOWED_ROOTS=/watched/home`. To watch a host folder like `C:\Users\you\Docs`, select the equivalent container path under `/watched/home`, for example `/watched/home/Docs`. Set `FOLDER_WATCH_HOST_ROOT` before `docker compose up` if you want to expose a different host root.
 
 ## Full Container Mode
 
@@ -355,11 +421,13 @@ python -m pytest tests/test_store.py::test_add_url -v
 
 ```
 recall/
-├── api.py              # FastAPI server (15 endpoints)
-├── mcp_server.py       # MCP server (6 LLM agent tools)
+├── api.py              # FastAPI server (23 endpoints)
+├── mcp_server.py       # MCP server (14 LLM agent tools)
 ├── search_utils.py     # Shared search logic — label parsing, filter building, result normalization, boost blending, source diversity, hints (used by both API + MCP)
 ├── ingest.py           # Crawl → metadata extract → chunk → embed → store pipeline
-├── store.py            # SQLite config store (URLs, crawl history, app config, url_labels)
+├── file_processor.py   # File extraction/chunk/embed pipeline for uploads and watched folders
+├── folder_watcher.py   # Supervisor + subprocess worker for recursive folder watches
+├── store.py            # SQLite config store (URLs, files, folder watches, app config, labels)
 ├── chunker.py          # Token-aware text chunking (tiktoken, paragraph-preserving, section heading metadata)
 ├── requirements.txt    # Python dependencies (includes tiktoken)
 ├── docker-compose.yml  # Qdrant + API services (shm_size: 2gb)
@@ -368,7 +436,7 @@ recall/
 ├── .mcp.json           # Claude Code auto-connect MCP config
 ├── data/               # SQLite database (persisted volume)
 ├── static/             # Web UI (Tailwind CSS, index.html)
-└── tests/              # 120+ tests across 7 files
+└── tests/              # 180+ tests across API, store, search, file, MCP, and watcher behavior
 ```
 
 ## Tech Stack
@@ -379,5 +447,6 @@ recall/
 - **cross-encoder/ms-marco-MiniLM-L-6-v2** — Reranker (sigmoid-normalized to 0–1)
 - **FastAPI** — API server with async support, combined lifespan for MCP
 - **FastMCP 3.x** — MCP streamable HTTP transport, mounted as ASGI sub-app
+- **watchdog** — Cross-platform filesystem notifications for recursive folder watching
 - **Tailwind CSS** — Dashboard UI with dark theme, mobile responsive
 - **SQLite** — Config store (WAL mode, stdlib, zero extra deps)
