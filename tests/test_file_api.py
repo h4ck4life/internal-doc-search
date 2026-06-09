@@ -58,8 +58,33 @@ def test_upload_file_success(client, temp_db):
         assert data["file_type"] == "txt"
         assert data["file_size"] == 11
         assert data["status"] == "pending"
+        assert len(data["content_sha256"]) == 64
         assert set(data["labels"]) == {"Auth", "API"}
         MockThread.assert_called_once()
+
+
+def test_upload_file_duplicate_content_returns_409(client, temp_db):
+    """POST /files rejects duplicate raw file content by SHA-256."""
+    with patch("api.threading.Thread") as MockThread, \
+         patch("file_processor.detect_file_type", return_value=("txt", MagicMock())):
+        first = client.post(
+            "/files",
+            files={"file": ("first.txt", io.BytesIO(b"same content"), "text/plain")},
+            data={"labels": "Docs"},
+        )
+        assert first.status_code == 201
+
+        second = client.post(
+            "/files",
+            files={"file": ("renamed.txt", io.BytesIO(b"same content"), "text/plain")},
+            data={"labels": "Other"},
+        )
+
+        assert second.status_code == 409
+        detail = second.json()["detail"]
+        assert detail["status"] == "duplicate_file"
+        assert detail["file"]["filename"] == "first.txt"
+        assert MockThread.call_count == 1
 
 
 def test_upload_file_spawns_background_thread(client, temp_db):

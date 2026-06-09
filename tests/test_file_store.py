@@ -3,6 +3,9 @@
 import pytest
 
 
+SHA_A = "a" * 64
+
+
 def test_init_db_creates_files_table(temp_db):
     """init_db creates files and file_labels tables."""
     conn = temp_db._get_conn()
@@ -13,6 +16,8 @@ def test_init_db_creates_files_table(temp_db):
         table_names = [t["name"] for t in tables]
         assert "files" in table_names
         assert "file_labels" in table_names
+        file_cols = conn.execute("PRAGMA table_info(files)").fetchall()
+        assert "content_sha256" in [c["name"] for c in file_cols]
     finally:
         conn.close()
 
@@ -36,6 +41,25 @@ def test_add_file_with_labels_list(temp_db):
     assert record["file_type"] == "pdf"
     assert record["file_size"] == 2048
     assert record["labels"] == ["Auth", "API", "Reference"]
+
+
+def test_add_file_stores_content_digest(temp_db):
+    """add_file can store and return a content SHA-256 digest."""
+    record = temp_db.add_file("guide.pdf", "pdf", 2048, ["Docs"], SHA_A)
+    assert record["content_sha256"] == SHA_A
+
+    fetched = temp_db.get_file_by_digest(SHA_A)
+    assert fetched is not None
+    assert fetched["id"] == record["id"]
+    assert fetched["filename"] == "guide.pdf"
+
+
+def test_add_file_duplicate_digest_rejected(temp_db):
+    """SQLite unique index rejects duplicate content digests."""
+    temp_db.add_file("one.txt", "txt", 3, ["Docs"], SHA_A)
+    with pytest.raises(temp_db.DuplicateFileError) as exc:
+        temp_db.add_file("two.txt", "txt", 3, ["Docs"], SHA_A)
+    assert exc.value.existing_file["filename"] == "one.txt"
 
 
 def test_add_file_no_labels(temp_db):

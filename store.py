@@ -13,6 +13,14 @@ DB_PATH = os.path.join(DB_DIR, "config.db")
 os.makedirs(DB_DIR, exist_ok=True)
 
 
+class DuplicateFileError(ValueError):
+    """Raised when a file content digest already exists."""
+
+    def __init__(self, existing_file: dict):
+        super().__init__("File content has already been uploaded")
+        self.existing_file = existing_file
+
+
 def _get_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -64,6 +72,7 @@ def init_db() -> None:
                 filename TEXT NOT NULL,
                 file_type TEXT NOT NULL,
                 file_size INTEGER DEFAULT 0,
+                content_sha256 TEXT,
                 status TEXT DEFAULT 'pending',
                 chunk_count INTEGER DEFAULT 0,
                 error_message TEXT,
@@ -86,6 +95,11 @@ def init_db() -> None:
         _migrate_add_column(conn, "urls", "deep_crawl_url_pattern", "TEXT DEFAULT ''")
         _migrate_add_column(conn, "urls", "deep_crawl_exclude_pattern", "TEXT DEFAULT ''")
         _migrate_add_column(conn, "urls", "parent_url_id", "INTEGER REFERENCES urls(id)")
+        _migrate_add_column(conn, "files", "content_sha256", "TEXT")
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_files_content_sha256 "
+            "ON files(content_sha256) WHERE content_sha256 IS NOT NULL"
+        )
         conn.commit()
 
         # Migrate: copy legacy single-label rows into url_labels so search
@@ -525,7 +539,19 @@ def _get_file_labels(conn: sqlite3.Connection, file_id: int) -> List[str]:
     return [r["label"] for r in rows]
 
 
-def add_file(filename: str, file_type: str, file_size: int, labels: List[str]) -> dict:
+def _row_to_file(conn: sqlite3.Connection, row: sqlite3.Row) -> dict:
+    result = dict(row)
+    result["labels"] = _get_file_labels(conn, result["id"])
+    return result
+
+
+def add_file(
+    filename: str,
+    file_type: str,
+    file_size: int,
+    labels: List[str],
+    content_sha256: Optional[str] = None,
+) -> dict:
     """Insert a new file record. Returns the created row as dict with a 'labels' list.
 
     Args:
@@ -533,22 +559,46 @@ def add_file(filename: str, file_type: str, file_size: int, labels: List[str]) -
         file_type: Detected file type (pdf, docx, txt, md, html, csv, json).
         file_size: File size in bytes.
         labels: List of topic labels. At least one is required.
+        content_sha256: Optional SHA-256 digest of the raw file bytes.
     """
     merged = _normalize_labels(labels)
     conn = _get_conn()
     try:
         cur = conn.execute(
-            "INSERT INTO files (filename, file_type, file_size, status, created_at) "
-            "VALUES (?, ?, ?, 'pending', ?)",
-            (filename, file_type, file_size, _now_iso()),
+            "INSERT INTO files (filename, file_type, file_size, content_sha256, status, created_at) "
+            "VALUES (?, ?, ?, ?, 'pending', ?)",
+            (filename, file_type, file_size, content_sha256, _now_iso()),
         )
         file_id = cur.lastrowid
         _set_file_labels(conn, file_id, merged)
         conn.commit()
         row = conn.execute("SELECT * FROM files WHERE id = ?", (file_id,)).fetchone()
-        result = dict(row)
-        result["labels"] = _get_file_labels(conn, file_id)
-        return result
+        return _row_to_file(conn, row)
+    except sqlite3.IntegrityError as e:
+        conn.rollback()
+        if content_sha256:
+            row = conn.execute(
+                "SELECT * FROM files WHERE content_sha256 = ?",
+                (content_sha256,),
+            ).fetchone()
+            if row is not None:
+                raise DuplicateFileError(_row_to_file(conn, row)) from e
+        raise
+    finally:
+        conn.close()
+
+
+def get_file_by_digest(content_sha256: str) -> Optional[dict]:
+    """Get a file by raw-content SHA-256 digest."""
+    conn = _get_conn()
+    try:
+        row = conn.execute(
+            "SELECT * FROM files WHERE content_sha256 = ?",
+            (content_sha256,),
+        ).fetchone()
+        if row is None:
+            return None
+        return _row_to_file(conn, row)
     finally:
         conn.close()
 
@@ -597,8 +647,7 @@ def delete_file(file_id: int) -> Optional[dict]:
         existing = conn.execute("SELECT * FROM files WHERE id = ?", (file_id,)).fetchone()
         if existing is None:
             return None
-        result = dict(existing)
-        result["labels"] = _get_file_labels(conn, file_id)
+        result = _row_to_file(conn, existing)
         conn.execute("DELETE FROM files WHERE id = ?", (file_id,))
         conn.commit()
         return result
@@ -613,9 +662,7 @@ def get_file(file_id: int) -> Optional[dict]:
         row = conn.execute("SELECT * FROM files WHERE id = ?", (file_id,)).fetchone()
         if row is None:
             return None
-        result = dict(row)
-        result["labels"] = _get_file_labels(conn, file_id)
-        return result
+        return _row_to_file(conn, row)
     finally:
         conn.close()
 

@@ -1,4 +1,4 @@
-"""MCP server for Internal Doc Search — exposes tools for LLM agents.
+"""MCP server for Recall — exposes tools for LLM agents.
 
 Tools:
   - list_labels: List all available labels with chunk/URL counts
@@ -14,6 +14,7 @@ Run: `fastmcp run mcp_server.py` (standalone) or mounted in FastAPI via `mcp.htt
 
 import os
 import re
+import hashlib
 import threading as _th
 from typing import Optional
 
@@ -52,15 +53,19 @@ def _ensure_imports():
     global AsyncQdrantClient, models
     global init_db, list_urls, add_url, get_config, validate_url_input
     global _store_list_files, _store_delete_file, _store_get_file, _store_add_file
+    global _store_get_file_by_digest
+    global DuplicateFileError
     from qdrant_client import AsyncQdrantClient, models  # noqa: F811
     from store import (  # noqa: F811
         init_db, list_urls, add_url, get_config, validate_url_input,
+        DuplicateFileError,
     )
     import store as _store
     _store_list_files = _store.list_files
     _store_delete_file = _store.delete_file
     _store_get_file = _store.get_file
     _store_add_file = _store.add_file
+    _store_get_file_by_digest = _store.get_file_by_digest
     _imports_loaded = True
 
 
@@ -803,7 +808,8 @@ async def upload_file(
         file_path: Absolute or relative path to the file on disk.
         labels: List of topic labels (e.g., ["Auth", "API"]). At least one
             label is required. Chunks are replicated once per label so
-            any single label filter returns the file's content.
+            any single label filter returns the file's content. Duplicate
+            raw file content is rejected by SHA-256 digest.
 
     Returns:
         The file record with id, filename, file_type, file_size, labels,
@@ -855,9 +861,25 @@ async def upload_file(
 
     file_type, _ = detected
     file_size = len(content)
+    content_sha256 = hashlib.sha256(content).hexdigest()
+
+    duplicate = _store_get_file_by_digest(content_sha256)
+    if duplicate is not None:
+        return {
+            "error": "This file content has already been uploaded.",
+            "status": "duplicate_file",
+            "file": duplicate,
+        }
 
     # Insert record with status='pending' — processing runs in background
-    record = _store_add_file(filename, file_type, file_size, labels)
+    try:
+        record = _store_add_file(filename, file_type, file_size, labels, content_sha256)
+    except DuplicateFileError as e:
+        return {
+            "error": "This file content has already been uploaded.",
+            "status": "duplicate_file",
+            "file": e.existing_file,
+        }
 
     # Process in background thread to avoid blocking the async event loop.
     # Uses shared._run_file_processing (same as REST API POST /files).

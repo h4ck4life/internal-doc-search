@@ -1,5 +1,6 @@
 """FastAPI server exposing /search with two-stage retrieval + UI support endpoints."""
 
+import hashlib
 import json
 import os
 import threading
@@ -31,6 +32,7 @@ from shared import (
 )
 
 from store import (
+    DuplicateFileError,
     init_db,
     list_urls,
     add_url,
@@ -46,6 +48,7 @@ from store import (
     get_file,
     get_file_count,
     get_file_chunk_count,
+    get_file_by_digest,
 )
 
 from search_utils import (
@@ -134,7 +137,7 @@ async def combined_lifespan(app: FastAPI):
             yield
 
 app = FastAPI(
-    title="Internal Doc Search",
+    title="Recall",
     lifespan=combined_lifespan,
 )
 
@@ -686,6 +689,7 @@ async def upload_file_endpoint(
     """Upload a document file for indexing. Accepts: PDF, DOCX, TXT, MD, HTML, CSV, JSON.
 
     Labels are comma-separated (e.g. "Auth, API"). At least one label is required.
+    Duplicate file content is rejected by SHA-256 digest with HTTP 409.
     Processing runs in a background thread — the file appears in /files immediately
     but chunks may take a few seconds to appear in search results.
     """
@@ -726,8 +730,30 @@ async def upload_file_endpoint(
             detail=f"File too large. Maximum size is {MAX_FILE_SIZE // (1024 * 1024)} MB.",
         )
 
+    content_sha256 = hashlib.sha256(content).hexdigest()
+    duplicate = get_file_by_digest(content_sha256)
+    if duplicate is not None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "status": "duplicate_file",
+                "message": "This file content has already been uploaded.",
+                "file": duplicate,
+            },
+        )
+
     # Insert SQLite record (file_type from the earlier detection)
-    record = add_file(filename, file_type, len(content), label_list)
+    try:
+        record = add_file(filename, file_type, len(content), label_list, content_sha256)
+    except DuplicateFileError as e:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "status": "duplicate_file",
+                "message": "This file content has already been uploaded.",
+                "file": e.existing_file,
+            },
+        )
 
     # Process in tracked background thread (joined at shutdown)
     _spawn_file_thread(content, filename, label_list, record["id"])

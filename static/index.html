@@ -630,7 +630,7 @@
         <div class="api-row"><span class="method put">PUT</span><span class="api-path">/urls/{id}</span><span class="api-desc">Update URL string, label, or deep crawl settings</span></div>
         <div class="api-row"><span class="method del">DEL</span><span class="api-path">/urls/{id}</span><span class="api-desc">Remove crawl URL and its vectors</span></div>
         <div class="api-row"><span class="method post">POST</span><span class="api-path">/urls/{id}/recrawl</span><span class="api-desc">Re-crawl a single URL in background</span></div>
-        <div class="api-row"><span class="method post">POST</span><span class="api-path">/files</span><span class="api-desc">Upload document (multipart: file + labels)</span></div>
+        <div class="api-row"><span class="method post">POST</span><span class="api-path">/files</span><span class="api-desc">Upload document (multipart: file + labels; duplicate content returns 409)</span></div>
         <div class="api-row"><span class="method get">GET</span><span class="api-path">/files</span><span class="api-desc">List uploaded files with labels and chunk counts</span></div>
         <div class="api-row"><span class="method del">DEL</span><span class="api-path">/files/{id}</span><span class="api-desc">Delete file and its vectors from Qdrant</span></div>
         <div class="api-row"><span class="method get">GET</span><span class="api-path">/config</span><span class="api-desc">Get all configuration values</span></div>
