@@ -273,6 +273,16 @@
   .result-content { white-space: pre-wrap; font-size: 0.88rem; line-height: 1.6; }
   .result-meta { font-size: 0.78rem; color: var(--muted); }
   .result-url  { font-size: 0.78rem; margin-top: 0.5rem; word-break: break-all; }
+  /* Collapsible result body + pager */
+  .result-content.clamped { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 6; overflow: hidden; }
+  .result-toggle { background: none; border: none; color: var(--accent); cursor: pointer; font-size: 0.78rem; padding: 0.3rem 0 0; }
+  .result-toggle:hover { text-decoration: underline; }
+  .results-bar { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 0.6rem; font-size: 0.78rem; color: var(--muted); }
+  .pager { display: flex; gap: 0.3rem; flex-wrap: wrap; align-items: center; justify-content: center; margin-top: 0.9rem; }
+  .pager button { min-width: 2rem; padding: 0.3rem 0.55rem; border: 1px solid var(--border); background: var(--surface); color: var(--text); border-radius: 7px; cursor: pointer; font-size: 0.8rem; }
+  .pager button:hover:not(:disabled) { border-color: #3d4753; background: var(--surface-2); }
+  .pager button.active { background: var(--accent-700); border-color: var(--accent-700); color: #fff; }
+  .pager button:disabled { opacity: 0.4; cursor: not-allowed; }
 
   /* Inline status messages */
   .status-msg { font-size: 0.85rem; margin-top: 0.6rem; }
@@ -1053,6 +1063,9 @@ function resetConfig() {
 }
 
 // ─── Search ──────────────────────────────────────────────────────
+let _searchItems = [], _searchHint = null, _searchPage = 1, _searchExpandAll = false;
+const SEARCH_PAGE_SIZE = 5;
+
 async function doSearch() {
   const q = document.getElementById('searchQuery').value.trim();
   if (!q) return;
@@ -1068,27 +1081,114 @@ async function doSearch() {
     }
     const data = await (await fetch(`/search?${params}`)).json();
     const items = Array.isArray(data) ? data : (data.results || []);
-    const hint = !Array.isArray(data) && data._hint ? data._hint : null;
-    if (!items.length) {
-      let html = '<p style="opacity:0.4;text-align:center;padding:1rem">No results found.</p>';
-      if (hint) html += `<p style="font-size:0.8rem;text-align:center;opacity:0.55;margin-top:0.3rem;padding:0.5rem;background:#1e3a5f;border-radius:8px">💡 ${esc(hint)}</p>`;
-      results.innerHTML = html; return;
-    }
-    let html = '';
-    if (hint) html += `<p style="font-size:0.78rem;opacity:0.55;margin-bottom:0.75rem;padding:0.5rem 0.75rem;background:#1e3a5f;border:1px solid #2a4d7a;border-radius:8px">💡 ${esc(hint)}</p>`;
-    html += items.map(r => {
-      const ce = r.cross_encoder_score, cls = ce > 0.7 ? 'score-high' : ce > 0.3 ? 'score-mid' : 'score-low';
-      const labelBadge = r.label ? `<span class="inline-flex items-center gap-0.5 px-2 py-0.5 rounded-full text-xs font-medium bg-blue-900/60 text-blue-300 border border-blue-800/50">🏷 ${esc(r.label)}</span>` : '';
-      const finalScore = r.final_score != null ? `<span>· Final ${r.final_score.toFixed(3)}</span>` : '';
-      return `<article class="result-card bg-gray-950/50 border border-border rounded-lg p-4">
-        <div class="result-meta flex flex-wrap items-center gap-x-3 gap-y-1">${labelBadge}<span class="flex items-center gap-2"><span>CE <strong class="${cls}">${ce.toFixed(3)}</strong></span><span>· Qdrant ${r.score.toFixed(3)}</span>${finalScore}<span>· Chunk #${r.chunk_index}</span></span></div>
-        <div class="result-content mt-2">${esc(r.content)}</div>
-        <div class="result-url">🔗 <a href="${esc(r.url)}" target="_blank" class="text-blue-400 hover:underline">${esc(r.url)}</a></div>
-      </article>`;
-    }).join('');
-    results.innerHTML = html;
+    _searchItems = items;
+    _searchHint = (!Array.isArray(data) && data._hint) ? data._hint : null;
+    _searchPage = 1;
+    _searchExpandAll = false;
+    _renderSearch();
   } catch(e) { results.innerHTML = `<p style="color:#f87171">Error: ${esc(e.message)}</p>`; }
   finally { btn.disabled = false; btn.innerHTML = 'Search'; }
+}
+
+// Render the current page of results. Each body is clamped to a few lines by
+// default; the per-card toggle is revealed only when the text overflows.
+// Pagination is client-side over the already-fetched result set.
+function _renderSearch() {
+  const results = document.getElementById('searchResults');
+  const items = _searchItems;
+  if (!items.length) {
+    let html = '<p style="opacity:0.4;text-align:center;padding:1rem">No results found.</p>';
+    if (_searchHint) html += `<p style="font-size:0.8rem;text-align:center;opacity:0.55;margin-top:0.3rem;padding:0.5rem;background:#1e3a5f;border-radius:8px">💡 ${esc(_searchHint)}</p>`;
+    results.innerHTML = html;
+    return;
+  }
+  const totalPages = Math.max(1, Math.ceil(items.length / SEARCH_PAGE_SIZE));
+  if (_searchPage > totalPages) _searchPage = totalPages;
+  if (_searchPage < 1) _searchPage = 1;
+  const start = (_searchPage - 1) * SEARCH_PAGE_SIZE;
+  const pageItems = items.slice(start, start + SEARCH_PAGE_SIZE);
+
+  let html = '';
+  if (_searchHint) html += `<p style="font-size:0.78rem;opacity:0.55;margin-bottom:0.75rem;padding:0.5rem 0.75rem;background:#1e3a5f;border:1px solid #2a4d7a;border-radius:8px">💡 ${esc(_searchHint)}</p>`;
+  html += `<div class="results-bar">
+    <span>${items.length} result${items.length === 1 ? '' : 's'} · showing ${start + 1}-${start + pageItems.length}</span>
+    <button id="expandAllBtn" class="result-toggle" onclick="_toggleExpandAll()">${_searchExpandAll ? 'Collapse all' : 'Expand all'}</button>
+  </div>`;
+  html += pageItems.map((r, i) => {
+    const idx = start + i;
+    const ce = r.cross_encoder_score, cls = ce > 0.7 ? 'score-high' : ce > 0.3 ? 'score-mid' : 'score-low';
+    const labelBadge = r.label ? `<span class="inline-flex items-center gap-0.5 px-2 py-0.5 rounded-full text-xs font-medium bg-blue-900/60 text-blue-300 border border-blue-800/50">🏷 ${esc(r.label)}</span>` : '';
+    const finalScore = r.final_score != null ? `<span>· Final ${r.final_score.toFixed(3)}</span>` : '';
+    const clampCls = _searchExpandAll ? '' : ' clamped';
+    return `<article class="result-card bg-gray-950/50 border border-border rounded-lg p-4">
+        <div class="result-meta flex flex-wrap items-center gap-x-3 gap-y-1">${labelBadge}<span class="flex items-center gap-2"><span>CE <strong class="${cls}">${ce.toFixed(3)}</strong></span><span>· Qdrant ${r.score.toFixed(3)}</span>${finalScore}<span>· Chunk #${r.chunk_index}</span></span></div>
+        <div class="result-content mt-2${clampCls}" id="rc-${idx}">${esc(r.content)}</div>
+        <button class="result-toggle hidden" data-target="rc-${idx}" onclick="_toggleResultBody(this)">Show more</button>
+        <div class="result-url">🔗 <a href="${esc(r.url)}" target="_blank" class="text-blue-400 hover:underline">${esc(r.url)}</a></div>
+      </article>`;
+  }).join('');
+  html += _renderPager(totalPages);
+  results.innerHTML = html;
+
+  // Reveal "Show more" only where the body is taller than the clamp. Measure
+  // against the clamped height even when expand-all is active.
+  requestAnimationFrame(() => {
+    document.querySelectorAll('#searchResults .result-content').forEach(el => {
+      const btn = document.querySelector(`#searchResults .result-toggle[data-target="${el.id}"]`);
+      if (!btn) return;
+      const wasClamped = el.classList.contains('clamped');
+      if (!wasClamped) el.classList.add('clamped');
+      const overflowing = el.scrollHeight > el.clientHeight + 2;
+      if (!wasClamped) el.classList.remove('clamped');
+      if (overflowing) {
+        btn.classList.remove('hidden');
+        btn.textContent = el.classList.contains('clamped') ? 'Show more' : 'Show less';
+      } else {
+        btn.classList.add('hidden');
+      }
+    });
+  });
+}
+
+function _renderPager(totalPages) {
+  if (totalPages <= 1) return '';
+  let b = '<div class="pager">';
+  b += `<button ${_searchPage === 1 ? 'disabled' : ''} onclick="_gotoSearchPage(${_searchPage - 1})" title="Previous">‹</button>`;
+  for (let p = 1; p <= totalPages; p++) {
+    b += `<button class="${p === _searchPage ? 'active' : ''}" onclick="_gotoSearchPage(${p})">${p}</button>`;
+  }
+  b += `<button ${_searchPage === totalPages ? 'disabled' : ''} onclick="_gotoSearchPage(${_searchPage + 1})" title="Next">›</button>`;
+  b += '</div>';
+  return b;
+}
+
+function _gotoSearchPage(n) {
+  const totalPages = Math.max(1, Math.ceil(_searchItems.length / SEARCH_PAGE_SIZE));
+  _searchPage = Math.min(Math.max(1, n), totalPages);
+  _renderSearch();
+  const sec = document.getElementById('searchResults');
+  if (sec) sec.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function _toggleResultBody(btn) {
+  const el = document.getElementById(btn.dataset.target);
+  if (!el) return;
+  const nowClamped = el.classList.toggle('clamped');
+  btn.textContent = nowClamped ? 'Show more' : 'Show less';
+}
+
+function _toggleExpandAll() {
+  _searchExpandAll = !_searchExpandAll;
+  document.querySelectorAll('#searchResults .result-content').forEach(el => {
+    el.classList.toggle('clamped', !_searchExpandAll);
+  });
+  document.querySelectorAll('#searchResults .result-toggle[data-target]').forEach(btn => {
+    if (btn.classList.contains('hidden')) return;
+    const el = document.getElementById(btn.dataset.target);
+    if (el) btn.textContent = el.classList.contains('clamped') ? 'Show more' : 'Show less';
+  });
+  const lbl = document.getElementById('expandAllBtn');
+  if (lbl) lbl.textContent = _searchExpandAll ? 'Collapse all' : 'Expand all';
 }
 
 // ─── Label chips ─────────────────────────────────────────────────
