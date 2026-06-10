@@ -97,6 +97,52 @@ def _find_section_heading(
     return best
 
 
+def _split_text_by_tokens(text: str, max_tokens: int) -> list[str]:
+    token_ids = _ENCODING.encode(text)
+    chunks = []
+    for start in range(0, len(token_ids), max_tokens):
+        chunk = _ENCODING.decode(token_ids[start:start + max_tokens]).strip()
+        if chunk:
+            chunks.append(chunk)
+    return chunks
+
+
+def _split_oversized_paragraph(paragraph: str, max_tokens: int) -> list[str]:
+    """Split text that has no blank-line boundaries into token-safe chunks."""
+    lines = [line.strip() for line in paragraph.splitlines() if line.strip()]
+    if len(lines) <= 1:
+        return _split_text_by_tokens(paragraph, max_tokens)
+
+    chunks: list[str] = []
+    current_lines: list[str] = []
+    current_tokens = 0
+    separator_tokens = len(_ENCODING.encode("\n"))
+
+    for line in lines:
+        line_tokens = len(_ENCODING.encode(line))
+        if line_tokens > max_tokens:
+            if current_lines:
+                chunks.append("\n".join(current_lines))
+                current_lines = []
+                current_tokens = 0
+            chunks.extend(_split_text_by_tokens(line, max_tokens))
+            continue
+
+        extra_separator = separator_tokens if current_lines else 0
+        if current_lines and current_tokens + extra_separator + line_tokens > max_tokens:
+            chunks.append("\n".join(current_lines))
+            current_lines = [line]
+            current_tokens = line_tokens
+        else:
+            current_lines.append(line)
+            current_tokens += extra_separator + line_tokens
+
+    if current_lines:
+        chunks.append("\n".join(current_lines))
+
+    return chunks
+
+
 def chunk_text(
     text: str,
     max_tokens: Optional[int] = None,
@@ -148,14 +194,16 @@ def chunk_text(
 
         para_tokens = len(_ENCODING.encode(para))
 
-        # If a single paragraph exceeds the limit, it becomes its own chunk
+        # If a single paragraph exceeds the limit, split it internally.
+        # This keeps newline-delimited sources such as CSV exports from becoming
+        # one huge Qdrant payload when they do not contain blank lines.
         if para_tokens > max_tokens:
             # Flush current chunk if any
             if current:
                 raw_chunks.append(current.strip())
                 current = ""
                 current_tokens = 0
-            raw_chunks.append(para)
+            raw_chunks.extend(_split_oversized_paragraph(para, max_tokens))
             continue
 
         # If adding this paragraph would exceed the limit, start a new chunk

@@ -394,6 +394,61 @@ def test_process_file_upserts_qdrant_points_in_batches(monkeypatch, temp_db):
     assert batch_lengths == [2, 2, 1]
 
 
+def test_process_file_splits_qdrant_batch_after_timeout(monkeypatch, temp_db):
+    """Timed-out Qdrant writes should retry with smaller batches."""
+    record = temp_db.add_file("timeout.csv", "csv", 100, ["Docs"])
+    mock_chunks = [
+        {"text": f"chunk {idx}", "section_heading": ""}
+        for idx in range(4)
+    ]
+    mock_embeddings = [[float(idx)] * 768 for idx in range(4)]
+
+    _, mock_qdrant, _ = _mock_process_file_deps(
+        monkeypatch, mock_chunks, mock_embeddings,
+    )
+    monkeypatch.setenv("FILE_QDRANT_BATCH_SIZE", "4")
+    mock_client = MagicMock()
+    mock_col = MagicMock()
+    mock_col.name = "internal_docs"
+    mock_client.get_collections.return_value.collections = [mock_col]
+    mock_client.upsert.side_effect = [TimeoutError("timed out"), None, None]
+    mock_qdrant.QdrantClient.return_value = mock_client
+
+    from file_processor import process_file
+    result = process_file(b"a,b\nc,d", "timeout.csv", ["Docs"], record["id"])
+
+    assert result["status"] == "completed"
+    assert result["chunks_stored"] == 4
+    batch_lengths = [
+        len(call.kwargs["points"])
+        for call in mock_client.upsert.call_args_list
+    ]
+    assert batch_lengths == [4, 2, 2]
+
+
+def test_process_file_does_not_retry_non_timeout_qdrant_error(monkeypatch, temp_db):
+    """Only timeout-like Qdrant writes should use the split retry path."""
+    record = temp_db.add_file("bad-write.txt", "txt", 100, ["Docs"])
+    mock_chunks = [{"text": "chunk", "section_heading": ""}]
+    mock_embeddings = [[0.0] * 768]
+
+    _, mock_qdrant, _ = _mock_process_file_deps(
+        monkeypatch, mock_chunks, mock_embeddings,
+    )
+    mock_client = MagicMock()
+    mock_col = MagicMock()
+    mock_col.name = "internal_docs"
+    mock_client.get_collections.return_value.collections = [mock_col]
+    mock_client.upsert.side_effect = RuntimeError("bad request")
+    mock_qdrant.QdrantClient.return_value = mock_client
+
+    from file_processor import process_file
+    with pytest.raises(RuntimeError, match="bad request"):
+        process_file(b"text", "bad-write.txt", ["Docs"], record["id"])
+
+    assert mock_client.upsert.call_count == 1
+
+
 def test_process_file_streams_encoded_batches_to_qdrant(monkeypatch, temp_db):
     """Each encoded batch should be stored before the next batch is encoded."""
     record = temp_db.add_file("streamed.txt", "txt", 100, ["Docs"])

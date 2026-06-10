@@ -41,15 +41,22 @@ class TestChunkText:
         assert "Para one." in chunks[0]
         assert "Para three." in chunks[0]
 
-    def test_never_breaks_mid_paragraph(self):
-        """A single paragraph longer than max_tokens becomes its own chunk."""
+    def test_splits_oversized_single_paragraph(self):
+        """A single paragraph longer than max_tokens is split by tokens."""
         # Use no trailing space — chunker strips paragraphs
         long_para = "token " * 499 + "token"
         text = f"Short intro.\n\n{long_para}"
         chunks = chunk_text(text, max_tokens=400, overlap_tokens=0)
-        assert len(chunks) >= 2
-        # The long paragraph should be intact in a chunk (not split mid-paragraph)
-        assert any(long_para in c for c in chunks)
+        assert len(chunks) >= 3
+        assert all(len(c) < len(long_para) for c in chunks[1:])
+
+    def test_splits_oversized_newline_delimited_text_by_line(self):
+        """CSV-like single-newline text should become many token-sized chunks."""
+        row = "col1,col2," + ("value " * 30)
+        text = "\n".join(row for _ in range(20))
+        chunks = chunk_text(text, max_tokens=120, overlap_tokens=0)
+        assert len(chunks) > 1
+        assert all(len(c.splitlines()) > 1 for c in chunks)
 
     def test_overlap_adds_prefix(self):
         """Overlap prepends previous chunk's tail to next chunk."""

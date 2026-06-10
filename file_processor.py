@@ -9,6 +9,7 @@ import csv
 import json
 import logging
 import os
+import time
 import uuid
 from io import BytesIO, StringIO
 from typing import Callable, Optional
@@ -17,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_QDRANT_TIMEOUT_SECONDS = 120
 DEFAULT_FILE_QDRANT_BATCH_SIZE = 64
+DEFAULT_FILE_QDRANT_MAX_RETRIES = 3
 
 
 def _extract_pdf(content: bytes) -> str:
@@ -141,6 +143,84 @@ def _env_int(name: str, default: int, minimum: int = 1) -> int:
 def _iter_batches(items: list, batch_size: int):
     for start in range(0, len(items), batch_size):
         yield start, items[start:start + batch_size]
+
+
+def _is_retryable_qdrant_write_error(exc: Exception) -> bool:
+    """Return True for timeout-shaped Qdrant/httpx write failures."""
+    seen = set()
+    current: Optional[BaseException] = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        cls = current.__class__
+        details = " ".join(
+            [
+                cls.__name__.lower(),
+                getattr(cls, "__module__", "").lower(),
+                str(current).lower(),
+            ]
+        )
+        if "timeout" in details or "timed out" in details:
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def _upsert_points_with_timeout_retry(
+    client,
+    collection_name: str,
+    points: list,
+    *,
+    max_retries: int,
+    attempt: int = 1,
+) -> int:
+    """Upsert points, splitting timeout-prone batches into smaller requests."""
+    try:
+        client.upsert(collection_name=collection_name, points=points)
+        return len(points)
+    except Exception as exc:
+        if not _is_retryable_qdrant_write_error(exc):
+            raise
+
+        if len(points) > 1:
+            midpoint = max(1, len(points) // 2)
+            logger.warning(
+                "Qdrant upsert timed out for %d points; retrying as %d and %d",
+                len(points),
+                midpoint,
+                len(points) - midpoint,
+            )
+            stored = _upsert_points_with_timeout_retry(
+                client,
+                collection_name,
+                points[:midpoint],
+                max_retries=max_retries,
+            )
+            stored += _upsert_points_with_timeout_retry(
+                client,
+                collection_name,
+                points[midpoint:],
+                max_retries=max_retries,
+            )
+            return stored
+
+        if attempt >= max_retries:
+            raise
+
+        delay = min(2 ** (attempt - 1), 8)
+        logger.warning(
+            "Qdrant upsert timed out for a single point; retrying attempt %d/%d in %ss",
+            attempt + 1,
+            max_retries,
+            delay,
+        )
+        time.sleep(delay)
+        return _upsert_points_with_timeout_retry(
+            client,
+            collection_name,
+            points,
+            max_retries=max_retries,
+            attempt=attempt + 1,
+        )
 
 
 def process_file(
@@ -298,6 +378,9 @@ def process_file(
             qdrant_batch_size = _env_int(
                 "FILE_QDRANT_BATCH_SIZE", DEFAULT_FILE_QDRANT_BATCH_SIZE,
             )
+            qdrant_max_retries = _env_int(
+                "FILE_QDRANT_MAX_RETRIES", DEFAULT_FILE_QDRANT_MAX_RETRIES,
+            )
             stored_points = 0
             progress("embedding", 0, total_chunks, f"Embedding 0/{total_chunks} chunks")
             for start, chunk_batch in _iter_batches(chunks_with_meta, embed_batch_size):
@@ -348,11 +431,12 @@ def process_file(
                     f"Writing {total_points} vectors to Qdrant",
                 )
                 for _, qdrant_points in _iter_batches(points_batch, qdrant_batch_size):
-                    client.upsert(
-                        collection_name=shared.COLLECTION_NAME,
-                        points=qdrant_points,
+                    stored_points += _upsert_points_with_timeout_retry(
+                        client,
+                        shared.COLLECTION_NAME,
+                        qdrant_points,
+                        max_retries=qdrant_max_retries,
                     )
-                    stored_points += len(qdrant_points)
                     progress(
                         "storing",
                         stored_points,
