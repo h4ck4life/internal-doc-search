@@ -183,6 +183,7 @@ def init_db() -> None:
         "label_match_mode": "hard",
         "label_boost_weight": "0.3",
         "source_diversity_cap": "2",
+        "gpu_enabled": "false",
     }
     for key, value in defaults.items():
         set_config(key, value, upsert_only=True)

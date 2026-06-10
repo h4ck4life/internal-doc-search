@@ -269,6 +269,9 @@ def test_config_includes_label_match_mode(client):
     assert data["label_match_mode"] in ("hard", "boost")
     assert "label_boost_weight" in data
     assert 0.0 <= float(data["label_boost_weight"]) <= 1.0
+    assert "gpu_enabled" in data
+    assert "gpu_available" in data
+    assert "model_device" in data
 
 
 def test_config_set_label_match_mode(client):
@@ -294,6 +297,24 @@ def test_config_rejects_invalid_boost_weight(client):
     assert response.status_code == 400
     response = client.put("/config", json={"label_boost_weight": -0.1})
     assert response.status_code == 400
+
+
+def test_config_rejects_gpu_when_unavailable(client, monkeypatch):
+    """PUT /config refuses GPU toggle when CUDA is unavailable."""
+    monkeypatch.setattr("shared.is_gpu_available", lambda: False)
+    response = client.put("/config", json={"gpu_enabled": True})
+    assert response.status_code == 400
+    assert "GPU is not available" in response.json()["detail"]
+
+
+def test_config_can_disable_gpu(client, monkeypatch):
+    """PUT /config can explicitly keep GPU disabled."""
+    monkeypatch.setattr("shared.apply_model_device", lambda: "cpu")
+    response = client.put("/config", json={"gpu_enabled": False})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["config"]["gpu_enabled"] is False
+    assert data["config"]["model_device"] == "cpu"
 
 
 # ─── /docs-summary ────────────────────────────────────────────────

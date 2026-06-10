@@ -637,6 +637,7 @@ async def recrawl_url_endpoint(url_id: int):
 @app.get("/config")
 async def get_config_endpoint():
     """Return all app configuration values."""
+    gpu_available = shared.is_gpu_available()
     return {
         "chunk_max_chars": int(get_config("chunk_max_chars", "2000")),
         "chunk_overlap": int(get_config("chunk_overlap", "100")),
@@ -648,6 +649,10 @@ async def get_config_endpoint():
         "label_boost_weight": float(get_config("label_boost_weight", "0.3")),
         "min_ce_threshold": float(get_config("min_ce_threshold", "0.0")),
         "source_diversity_cap": int(get_config("source_diversity_cap", "2")),
+        "gpu_enabled": str(get_config("gpu_enabled", "false")).lower() in {"1", "true", "yes", "on"},
+        "gpu_available": gpu_available,
+        "gpu_name": shared.get_gpu_name() if gpu_available else "",
+        "model_device": shared.get_model_device(),
         "embedding_model": os.environ.get("MODEL_NAME", "multi-qa-mpnet-base-cos-v1"),
         "cross_encoder_model": os.environ.get("CROSS_ENCODER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2"),
     }
@@ -661,7 +666,7 @@ async def update_config_endpoint(body: dict):
         "chunk_max_tokens", "chunk_overlap_tokens",
         "search_limit", "rerank_candidates",
         "label_match_mode", "label_boost_weight", "min_ce_threshold",
-        "source_diversity_cap",
+        "source_diversity_cap", "gpu_enabled",
     }
     # Reject non-numeric values for numeric keys with a clear 400 (not a 500).
     _int_keys = {"chunk_max_chars", "chunk_overlap", "chunk_max_tokens",
@@ -685,11 +690,21 @@ async def update_config_endpoint(body: dict):
         t = float(body["min_ce_threshold"])
         if not 0.0 <= t <= 1.0:
             raise HTTPException(status_code=400, detail="min_ce_threshold must be in [0, 1]")
+    if "gpu_enabled" in body:
+        requested_gpu = str(body["gpu_enabled"]).lower() in {"1", "true", "yes", "on"}
+        if requested_gpu and not shared.is_gpu_available():
+            raise HTTPException(status_code=400, detail="GPU is not available to this container.")
+        if requested_gpu and (shared.is_ingest_running() or any(f.get("status") in ("pending", "processing") for f in list_files(limit=200))):
+            raise HTTPException(status_code=409, detail="Cannot enable GPU while crawl or file ingestion is running.")
     updated = {}
     for key, value in body.items():
         if key in allowed:
-            set_config(key, str(value))
+            stored_value = "true" if key == "gpu_enabled" and str(value).lower() in {"1", "true", "yes", "on"} else str(value)
+            set_config(key, stored_value)
             updated[key] = value
+    if "gpu_enabled" in updated:
+        device = shared.apply_model_device()
+        updated["model_device"] = device
     if not updated:
         raise HTTPException(status_code=400, detail="No valid config keys provided")
     return {"status": "updated", "config": updated}

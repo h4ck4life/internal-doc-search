@@ -651,6 +651,15 @@
             <span class="help">0 – 1</span>
             <span class="cfg-desc">Hides results below this cross-encoder score. 0 shows everything.</span>
           </div>
+          <div class="cfg-row" id="cfgGpuRow">
+            <label for="cfgGpuEnabled" class="cfg-label">GPU inference</label>
+            <label class="flex items-center gap-2" style="font-size:0.84rem;color:var(--text)">
+              <input type="checkbox" id="cfgGpuEnabled">
+              <span id="cfgGpuToggleText">Use GPU</span>
+            </label>
+            <span class="help" id="cfgGpuHelp">Checking GPU…</span>
+            <span class="cfg-desc" id="cfgGpuDesc">When enabled, embedding and reranking models run on CUDA. Keep off unless the container can see the host GPU.</span>
+          </div>
         </div>
         <p class="help mt-4" style="color:#4e5561">Embedding: multi-qa-mpnet-base-cos-v1 · Cross-encoder: ms-marco-MiniLM-L-6-v2</p>
         <div class="flex gap-2 mt-4">
@@ -1365,6 +1374,13 @@ async function loadConfig(){
     document.getElementById('cfgLabelMatchMode').value=c.label_match_mode||'hard';
     document.getElementById('cfgLabelBoostWeight').value=c.label_boost_weight??0.3;
     document.getElementById('cfgMinCeThreshold').value=c.min_ce_threshold??0.0;
+    const gpu=document.getElementById('cfgGpuEnabled'),gpuHelp=document.getElementById('cfgGpuHelp'),gpuDesc=document.getElementById('cfgGpuDesc');
+    if(gpu){
+      gpu.checked=!!c.gpu_enabled;
+      gpu.disabled=!c.gpu_available;
+      if(gpuHelp) gpuHelp.textContent=c.gpu_available?`Available: ${c.gpu_name||'CUDA GPU'} · active: ${c.model_device||'cpu'}`:'GPU not available to this container';
+      if(gpuDesc) gpuDesc.textContent=c.gpu_available?'Off by default. Enable only when no crawl or file ingestion is running.':'Expose an NVIDIA GPU to Docker and install CUDA PyTorch to enable this option.';
+    }
     searchLimit=c.search_limit;
     _updateLabelModeIndicator(c.label_match_mode||'hard',c.label_boost_weight??0.3);
     toggleBoostFields();
@@ -1386,6 +1402,7 @@ async function saveConfig(e){
     label_match_mode:document.getElementById('cfgLabelMatchMode').value,
     label_boost_weight:+document.getElementById('cfgLabelBoostWeight').value,
     min_ce_threshold:+document.getElementById('cfgMinCeThreshold').value,
+    gpu_enabled:document.getElementById('cfgGpuEnabled')?.checked||false,
   };
   searchLimit=cfg.search_limit;
   const el=document.getElementById('configMsg');
@@ -1399,7 +1416,7 @@ function resetConfig(){
   document.getElementById('cfgChunkMaxChars').value=2000;document.getElementById('cfgChunkOverlap').value=100;
   document.getElementById('cfgSearchLimit').value=7;document.getElementById('cfgRerankCandidates').value=50;
   document.getElementById('cfgLabelMatchMode').value='hard';document.getElementById('cfgLabelBoostWeight').value=0.3;
-  document.getElementById('cfgMinCeThreshold').value=0.0;saveConfig(new Event('submit'));
+  document.getElementById('cfgMinCeThreshold').value=0.0;if(document.getElementById('cfgGpuEnabled'))document.getElementById('cfgGpuEnabled').checked=false;saveConfig(new Event('submit'));
 }
 
 // ── Search ─────────────────────────────────────────────────────────

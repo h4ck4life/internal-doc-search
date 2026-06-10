@@ -397,6 +397,16 @@ docker compose up -d
 
 Both Qdrant and API will start. Web UI at `http://localhost:8000`, MCP at `http://localhost:8000/mcp/`. HF models cached at `./.cache`, database at `./data/`.
 
+### Optional GPU API Container
+
+The default compose stack runs the CPU API image. To expose an NVIDIA GPU to the API container with Podman, install/configure NVIDIA Container Toolkit CDI in the Podman machine, then start the GPU API service explicitly:
+
+```bash
+podman compose up -d qdrant api-gpu
+```
+
+The `api-gpu` service uses `devices: nvidia.com/gpu=all` and builds PyTorch from the CUDA wheel index. Stop the normal `api` service first if it is already running, because both services bind `localhost:8000`. The in-app GPU inference checkbox remains off by default and is disabled unless CUDA is visible inside the running container.
+
 See [CONTAINER.md](CONTAINER.md) for the published image guide, multi-arch build instructions, and image size breakdown.
 
 ## Running Tests

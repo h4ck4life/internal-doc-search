@@ -130,9 +130,18 @@ def _crawler_run_config(deep_crawl_strategy=None) -> CrawlerRunConfig:
 
 def _get_model() -> SentenceTransformer:
     global _model
+    from shared import get_model_device
+
+    device = get_model_device()
     if _model is None:
         model_name = os.environ.get("MODEL_NAME", "multi-qa-mpnet-base-cos-v1")
-        _model = SentenceTransformer(model_name)
+        _model = SentenceTransformer(model_name, device=device)
+    else:
+        try:
+            if str(getattr(_model, "device", "")) != device:
+                _model.to(device)
+        except Exception:
+            logger.warning("Failed to move ingest model to %s", device, exc_info=True)
     return _model
 
 

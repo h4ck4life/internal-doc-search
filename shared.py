@@ -48,11 +48,67 @@ def _load_models() -> None:
     cross_encoder_model = os.environ.get(
         "CROSS_ENCODER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2"
     )
-    logger.info("Loading bi-encoder: %s", model_name)
-    bi_encoder = SentenceTransformer(model_name)
-    logger.info("Loading cross-encoder: %s", cross_encoder_model)
-    cross_encoder = CrossEncoder(cross_encoder_model)
+    device = get_model_device()
+    logger.info("Loading bi-encoder: %s on %s", model_name, device)
+    bi_encoder = SentenceTransformer(model_name, device=device)
+    logger.info("Loading cross-encoder: %s on %s", cross_encoder_model, device)
+    cross_encoder = CrossEncoder(cross_encoder_model, device=device)
     logger.info("Models loaded successfully")
+
+
+def is_gpu_available() -> bool:
+    """Return True when PyTorch can see a CUDA GPU."""
+    try:
+        import torch
+
+        return bool(torch.cuda.is_available())
+    except Exception:
+        return False
+
+
+def get_gpu_name() -> str:
+    """Return CUDA device name when available."""
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            return torch.cuda.get_device_name(0)
+    except Exception:
+        pass
+    return ""
+
+
+def gpu_enabled_from_store() -> bool:
+    """Read persisted GPU preference. Defaults to off."""
+    try:
+        from store import get_config
+
+        return str(get_config("gpu_enabled", "false")).lower() in {"1", "true", "yes", "on"}
+    except Exception:
+        return False
+
+
+def get_model_device() -> str:
+    """Device for model inference based on config and actual CUDA availability."""
+    return "cuda" if gpu_enabled_from_store() and is_gpu_available() else "cpu"
+
+
+def apply_model_device() -> str:
+    """Move already-loaded models to the configured CPU/CUDA device."""
+    device = get_model_device()
+    for model in (bi_encoder, cross_encoder):
+        if model is None:
+            continue
+        try:
+            model.to(device)
+        except AttributeError:
+            inner = getattr(model, "model", None)
+            if inner is not None and hasattr(inner, "to"):
+                inner.to(device)
+        except Exception:
+            logger.error("Failed to move model to %s: %s", device, traceback.format_exc())
+            raise
+    return device
 
 
 # ─── Background ingest state ───────────────────────────────────────

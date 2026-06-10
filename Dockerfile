@@ -24,13 +24,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libcairo2 libasound2 libatspi2.0-0 fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 
-# ── Install CPU-only PyTorch FIRST ────────────────────────────────
-# sentence-transformers depends on torch; pre-installing the CPU wheel
-# (~180 MB) prevents pip from downloading the CUDA wheel (~426 MB).
+# ── Install PyTorch FIRST ─────────────────────────────────────────
+# sentence-transformers depends on torch; pre-install it so pip does not
+# choose a larger/default wheel later. Override TORCH_INDEX_URL with a CUDA
+# wheel index (for example cu124) when building the optional GPU image.
+ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
 # Use BuildKit cache mount so pip packages survive rebuilds with buildx.
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --no-compile --cache-dir /root/.cache/pip \
-    torch --index-url https://download.pytorch.org/whl/cpu
+    torch --index-url ${TORCH_INDEX_URL}
 
 # ── Install remaining Python deps ─────────────────────────────────
 COPY requirements.txt .
