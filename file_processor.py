@@ -248,7 +248,7 @@ def process_file(
     import shared
     from chunker import chunk_text_with_metadata
     from qdrant_client import QdrantClient, models as qmodels
-    from store import update_file_progress, update_file_status
+    from store import get_file, update_file_progress, update_file_status
 
     def progress(
         stage: str,
@@ -269,6 +269,28 @@ def process_file(
         if on_progress:
             on_progress(file_id, stage, current)
 
+    def stop_if_inactive(current: int = 0, total: int = 0) -> str:
+        record = get_file(file_id)
+        if not record:
+            if on_progress:
+                on_progress(file_id, "deleted", current)
+            return "deleted"
+        status = record.get("status")
+        if status not in ("paused", "deleting"):
+            return ""
+        message = "Deleting" if status == "deleting" else "Paused"
+        update_file_progress(
+            file_id,
+            status=status,
+            processing_stage=status,
+            progress_current=current,
+            progress_total=total,
+            progress_message=message,
+        )
+        if on_progress:
+            on_progress(file_id, status, current)
+        return status
+
     detected = detect_file_type(filename)
     if detected is None:
         update_file_status(
@@ -285,6 +307,9 @@ def process_file(
     file_type, extractor = detected
 
     # Step 1: Extract text
+    stop_status = stop_if_inactive(0, 1)
+    if stop_status:
+        return {"status": stop_status, "chunks_stored": 0}
     progress("extracting", 0, 1, f"Extracting text from {file_type.upper()}")
     try:
         text = extractor(content)
@@ -318,6 +343,9 @@ def process_file(
     from store import resolve_chunk_config
     max_tokens, overlap_tokens = resolve_chunk_config()
 
+    stop_status = stop_if_inactive(1, 1)
+    if stop_status:
+        return {"status": stop_status, "chunks_stored": 0}
     progress("chunking", 0, 1, "Splitting text into searchable chunks")
     chunks_with_meta = chunk_text_with_metadata(
         text, max_tokens=max_tokens, overlap_tokens=overlap_tokens,
@@ -352,6 +380,9 @@ def process_file(
     # Step 4: Ensure Qdrant collection exists, then encode and upsert in batches.
     client = None
     try:
+        stop_status = stop_if_inactive(0, total_points)
+        if stop_status:
+            return {"status": stop_status, "chunks_stored": 0}
         progress("storing", 0, total_points, "Connecting to Qdrant")
         qdrant_timeout = _env_int(
             "QDRANT_TIMEOUT_SECONDS",
@@ -362,6 +393,20 @@ def process_file(
             check_compatibility=False,
             timeout=qdrant_timeout,
         )
+
+        def delete_existing_file_vectors() -> None:
+            client.delete(
+                collection_name=shared.COLLECTION_NAME,
+                points_selector=qmodels.FilterSelector(
+                    filter=qmodels.Filter(
+                        must=[qmodels.FieldCondition(
+                            key="file_id",
+                            match=qmodels.MatchValue(value=file_id),
+                        )]
+                    )
+                ),
+            )
+
         collections = client.get_collections()
         exists = any(c.name == shared.COLLECTION_NAME for c in collections.collections)
         if not exists:
@@ -372,6 +417,11 @@ def process_file(
                     size=768, distance=qmodels.Distance.COSINE,
                 ),
             )
+        else:
+            stop_status = stop_if_inactive(0, total_points)
+            if stop_status:
+                return {"status": stop_status, "chunks_stored": 0}
+            delete_existing_file_vectors()
 
         if total_points:
             embed_batch_size = _env_int("FILE_EMBED_BATCH_SIZE", 32)
@@ -384,6 +434,11 @@ def process_file(
             stored_points = 0
             progress("embedding", 0, total_chunks, f"Embedding 0/{total_chunks} chunks")
             for start, chunk_batch in _iter_batches(chunks_with_meta, embed_batch_size):
+                stop_status = stop_if_inactive(start, total_chunks)
+                if stop_status:
+                    if stored_points:
+                        delete_existing_file_vectors()
+                    return {"status": stop_status, "chunks_stored": stored_points}
                 batch_texts = [cm["text"] for cm in chunk_batch]
                 batch_embeddings = shared.bi_encoder.encode(
                     batch_texts,
@@ -431,6 +486,11 @@ def process_file(
                     f"Writing {total_points} vectors to Qdrant",
                 )
                 for _, qdrant_points in _iter_batches(points_batch, qdrant_batch_size):
+                    stop_status = stop_if_inactive(stored_points, total_points)
+                    if stop_status:
+                        if stored_points:
+                            delete_existing_file_vectors()
+                        return {"status": stop_status, "chunks_stored": stored_points}
                     stored_points += _upsert_points_with_timeout_retry(
                         client,
                         shared.COLLECTION_NAME,

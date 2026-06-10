@@ -134,6 +134,8 @@ _file_threads_lock = threading.Lock()
 _file_queue: queue.Queue = queue.Queue()
 _file_worker_thread: Optional[threading.Thread] = None
 _file_worker_lock = threading.Lock()
+_file_enqueued_ids: set[int] = set()
+_file_enqueued_lock = threading.Lock()
 _FILE_QUEUE_STOP = object()
 
 
@@ -255,7 +257,7 @@ def _process_file_job(
             logger.error(
                 "File processing failed for %s: %s", filename, result.get("error"),
             )
-        if storage_path:
+        if storage_path and result.get("status") != "paused":
             from store import update_file_storage_path
 
             _remove_upload_content(storage_path)
@@ -304,6 +306,14 @@ def _file_worker_loop() -> None:
         except Exception:
             logger.error("Unhandled file queue worker error: %s", traceback.format_exc())
         finally:
+            if job is not _FILE_QUEUE_STOP:
+                try:
+                    queued_file_id = job[3]
+                except Exception:
+                    queued_file_id = None
+                if queued_file_id is not None:
+                    with _file_enqueued_lock:
+                        _file_enqueued_ids.discard(queued_file_id)
             _file_queue.task_done()
 
 
@@ -332,8 +342,18 @@ def enqueue_file_processing(
     storage_path: Optional[str] = None,
 ) -> threading.Thread:
     """Queue uploaded file processing and ensure the FIFO worker is running."""
+    with _file_enqueued_lock:
+        if file_id in _file_enqueued_ids:
+            return _ensure_file_worker()
+        _file_enqueued_ids.add(file_id)
     _file_queue.put((content, filename, labels, file_id, storage_path))
     return _ensure_file_worker()
+
+
+def is_file_processing_queued(file_id: int) -> bool:
+    """Return True while a file job is queued or actively running."""
+    with _file_enqueued_lock:
+        return file_id in _file_enqueued_ids
 
 
 def recover_queued_file_processing() -> int:

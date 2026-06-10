@@ -23,6 +23,7 @@ from chunker import chunk_text_with_metadata, extract_section_headings
 from store import (
     init_db,
     list_urls,
+    get_url,
     update_url_progress,
     update_url_status,
     get_config,
@@ -318,6 +319,10 @@ async def run_ingest(on_progress=None, only_pending: bool = False, url_id: Optio
         if not urls:
             return {"status": "completed", "urls_crawled": 0, "chunks_stored": 0, "message": "No pending URLs — all already crawled"}
 
+    urls = [u for u in urls if u["status"] != "paused"]
+    if not urls:
+        return {"status": "completed", "urls_crawled": 0, "chunks_stored": 0, "message": "No unpaused URLs to crawl"}
+
     model = _get_model()
     client = AsyncQdrantClient(
         url=QDRANT_URL,
@@ -368,6 +373,10 @@ async def run_ingest(on_progress=None, only_pending: bool = False, url_id: Optio
                     logger.info("Stop event received — cancelling remaining URLs")
                     break
                 url_id = url_entry["id"]
+                current_url_record = get_url(url_id)
+                if current_url_record and current_url_record.get("status") == "paused":
+                    logger.info("Skipping paused URL: %s", current_url_record.get("url"))
+                    continue
                 url = url_entry["url"]
                 label = url_entry.get("label", "") or ""
                 deep_crawl = bool(url_entry.get("deep_crawl", 0))
@@ -392,6 +401,27 @@ async def run_ingest(on_progress=None, only_pending: bool = False, url_id: Optio
                         chunk_count=chunk_count,
                     )
 
+                def stop_if_paused(
+                    stage: str,
+                    current: int = 0,
+                    total: int = 0,
+                ) -> bool:
+                    record = get_url(url_id)
+                    if not record or record.get("status") != "paused":
+                        return False
+                    update_url_progress(
+                        url_id,
+                        status="paused",
+                        processing_stage="paused",
+                        progress_current=current,
+                        progress_total=total,
+                        progress_message="Paused",
+                    )
+                    logger.info("Paused URL during %s: %s", stage, url)
+                    return True
+
+                if stop_if_paused("fetching", 0, 1):
+                    continue
                 progress("fetching", 0, 1, "Fetching page")
                 crawl_type = f"deep (max_depth={max_depth})" if deep_crawl else "single page"
                 if url_pattern:
@@ -401,6 +431,8 @@ async def run_ingest(on_progress=None, only_pending: bool = False, url_id: Optio
                 logger.info("Crawling [%s]: %s", crawl_type, url)
 
                 try:
+                    if stop_if_paused("fetching", 0, 1):
+                        continue
                     pages = await _crawl_single_url(
                         crawler, url, deep_crawl, max_depth,
                         url_pattern=url_pattern, exclude_pattern=exclude_pattern,
@@ -442,8 +474,26 @@ async def run_ingest(on_progress=None, only_pending: bool = False, url_id: Optio
                 total_chunks_stored = 0
                 chunk_jobs = []
                 total_points_stored = 0
+                paused_current_url = False
+
+                async def delete_current_chunk_vectors() -> None:
+                    for chunk_url in {job["store_url"] for job in chunk_jobs}:
+                        await client.delete(
+                            collection_name=COLLECTION_NAME,
+                            points_selector=models.FilterSelector(
+                                filter=models.Filter(
+                                    must=[models.FieldCondition(
+                                        key="url",
+                                        match=models.MatchValue(value=chunk_url),
+                                    )]
+                                )
+                            ),
+                        )
 
                 for page_idx, (page_url, md_text) in enumerate(pages):
+                    if stop_if_paused("chunking", page_idx, len(pages)):
+                        paused_current_url = True
+                        break
                     if not md_text or not md_text.strip():
                         continue
                     progress(
@@ -474,6 +524,9 @@ async def run_ingest(on_progress=None, only_pending: bool = False, url_id: Optio
                             logger.info("    Registered: %s", page_url)
 
                     # Delete old vectors for this page URL before re-ingesting
+                    if stop_if_paused("storing", page_idx, len(pages)):
+                        paused_current_url = True
+                        break
                     await client.delete(
                         collection_name=COLLECTION_NAME,
                         points_selector=models.FilterSelector(
@@ -520,6 +573,9 @@ async def run_ingest(on_progress=None, only_pending: bool = False, url_id: Optio
                         f"Created {total_chunks_stored} chunks",
                     )
 
+                if paused_current_url:
+                    continue
+
                 total_chunk_jobs = len(chunk_jobs)
                 if total_chunk_jobs:
                     batch_size = _env_int("URL_EMBED_BATCH_SIZE", 32)
@@ -530,6 +586,9 @@ async def run_ingest(on_progress=None, only_pending: bool = False, url_id: Optio
                     total_points_expected = total_chunk_jobs * len(url_labels)
                     progress("embedding", 0, total_chunk_jobs, f"Embedding 0/{total_chunk_jobs} chunks")
                     for start, batch_jobs in _iter_batches(chunk_jobs, batch_size):
+                        if stop_if_paused("embedding", start, total_chunk_jobs):
+                            paused_current_url = True
+                            break
                         batch_texts = [job["text"] for job in batch_jobs]
                         batch_embeddings = model.encode(
                             batch_texts,
@@ -572,6 +631,13 @@ async def run_ingest(on_progress=None, only_pending: bool = False, url_id: Optio
                                 f"Writing {total_points_expected} vectors",
                             )
                             for _, qdrant_points in _iter_batches(points_batch, qdrant_batch_size):
+                                if stop_if_paused(
+                                    "storing",
+                                    total_points_stored,
+                                    total_points_expected,
+                                ):
+                                    paused_current_url = True
+                                    break
                                 await client.upsert(
                                     collection_name=COLLECTION_NAME,
                                     points=qdrant_points,
@@ -583,6 +649,13 @@ async def run_ingest(on_progress=None, only_pending: bool = False, url_id: Optio
                                     total_points_expected,
                                     f"Stored {total_points_stored}/{total_points_expected} vectors",
                                 )
+                            if paused_current_url:
+                                break
+
+                if paused_current_url:
+                    if total_points_stored:
+                        await delete_current_chunk_vectors()
+                    continue
 
                 # Mark discovered pages as completed (they were registered as pending)
                 if deep_crawl:

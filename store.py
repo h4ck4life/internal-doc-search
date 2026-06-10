@@ -414,6 +414,21 @@ def list_urls() -> List[dict]:
         conn.close()
 
 
+def get_url(url_id: int) -> Optional[dict]:
+    """Get a single configured URL by ID with its labels."""
+    conn = _get_conn()
+    try:
+        row = conn.execute("SELECT * FROM urls WHERE id = ?", (url_id,)).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        result["labels"] = _get_url_labels(conn, result["id"])
+        result["parent_url_id"] = row["parent_url_id"]
+        return result
+    finally:
+        conn.close()
+
+
 def update_url(
     url_id: int,
     url: Optional[str] = None,

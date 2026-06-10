@@ -503,6 +503,43 @@ def test_delete_nonexistent_url(client):
     assert response.status_code == 404
 
 
+def test_pause_url_marks_row_paused(client):
+    """POST /urls/{id}/pause pauses only that URL row."""
+    from store import add_url, get_url
+
+    record = add_url("https://example.com/docs", labels=["Docs"])
+
+    response = client.post(f"/urls/{record['id']}/pause")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "paused"
+    stored = get_url(record["id"])
+    assert stored["status"] == "paused"
+    assert stored["processing_stage"] == "paused"
+
+
+def test_resume_url_queues_when_crawl_running(client):
+    """POST /urls/{id}/resume marks the URL pending without starting a second crawl."""
+    from store import add_url, get_url, update_url_progress
+
+    record = add_url("https://example.com/docs", labels=["Docs"])
+    update_url_progress(
+        record["id"],
+        status="paused",
+        processing_stage="paused",
+        progress_message="Paused",
+    )
+
+    with patch("api.try_start_ingest_state", return_value=False):
+        response = client.post(f"/urls/{record['id']}/resume")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "queued"
+    stored = get_url(record["id"])
+    assert stored["status"] == "pending"
+    assert stored["processing_stage"] == "queued"
+
+
 # ─── Ingest endpoint ──────────────────────────────────────────────
 
 

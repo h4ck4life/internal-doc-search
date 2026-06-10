@@ -77,6 +77,7 @@ def test_enqueue_file_processing_runs_jobs_sequentially(monkeypatch):
     monkeypatch.setattr(shared, "_process_file_job", fake_process)
     shared._file_queue = queue.Queue()
     shared._file_worker_thread = None
+    shared._file_enqueued_ids = set()
 
     try:
         first_worker = shared.enqueue_file_processing(b"one", "one.txt", ["Docs"], 1)
@@ -99,6 +100,7 @@ def test_enqueue_file_processing_runs_jobs_sequentially(monkeypatch):
         shared.join_file_threads(timeout=2)
         shared._file_queue = queue.Queue()
         shared._file_worker_thread = None
+        shared._file_enqueued_ids = set()
 
 
 def test_validate_file_upload_capacity_rejects_full_queue(monkeypatch):

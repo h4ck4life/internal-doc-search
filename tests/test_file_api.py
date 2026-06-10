@@ -1,6 +1,7 @@
 """Tests for file API endpoints via FastAPI TestClient."""
 
 import io
+import hashlib
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -180,6 +181,51 @@ def test_list_files_with_data(client, temp_db):
     assert data[1]["filename"] == "a.txt"
 
 
+def test_pause_file_marks_row_paused(client, temp_db):
+    """POST /files/{id}/pause pauses only that file row."""
+    record = temp_db.add_file("queued.txt", "txt", 10, ["Docs"])
+
+    resp = client.post(f"/files/{record['id']}/pause")
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "paused"
+    stored = temp_db.get_file(record["id"])
+    assert stored["status"] == "paused"
+    assert stored["processing_stage"] == "paused"
+
+
+def test_resume_file_requeues_persisted_upload(client, temp_db, tmp_path):
+    """POST /files/{id}/resume re-enqueues one paused file from storage."""
+    content = b"resume me"
+    digest = hashlib.sha256(content).hexdigest()
+    path = tmp_path / "resume.txt"
+    path.write_bytes(content)
+    record = temp_db.add_file(
+        "resume.txt", "txt", len(content), ["Docs"], digest, str(path),
+    )
+    temp_db.update_file_progress(
+        record["id"],
+        status="paused",
+        processing_stage="paused",
+        progress_message="Paused",
+    )
+
+    with patch("api._enqueue_file_processing") as mock_enqueue:
+        resp = client.post(f"/files/{record['id']}/resume")
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "queued"
+    stored = temp_db.get_file(record["id"])
+    assert stored["status"] == "pending"
+    mock_enqueue.assert_called_once_with(
+        content,
+        "resume.txt",
+        ["Docs"],
+        record["id"],
+        storage_path=str(path),
+    )
+
+
 def test_list_files_pagination(client, temp_db):
     """GET /files supports limit and offset params."""
     for i in range(3):
@@ -208,6 +254,7 @@ def test_delete_file_success(client, temp_db):
     with patch("api.AsyncQdrantClient") as MockQdrant:
         mock_client = MagicMock()
         mock_client.delete = AsyncMock()
+        mock_client.count = AsyncMock(return_value=MagicMock(count=0))
         mock_client.close = AsyncMock()
         MockQdrant.return_value = mock_client
 
@@ -225,12 +272,43 @@ def test_delete_file_cleans_qdrant_vectors(client, temp_db):
     with patch("api.AsyncQdrantClient") as MockQdrant:
         mock_client = MagicMock()
         mock_client.delete = AsyncMock()
+        mock_client.count = AsyncMock(return_value=MagicMock(count=0))
         mock_client.close = AsyncMock()
         MockQdrant.return_value = mock_client
 
         resp = client.delete(f"/files/{record['id']}")
         assert resp.status_code == 200
         mock_client.delete.assert_awaited_once()
+        mock_client.count.assert_awaited_once()
+
+
+def test_delete_processing_file_cancels_before_vector_cleanup(client, temp_db):
+    """Deleting an active file marks it deleting and waits before Qdrant cleanup."""
+    record = temp_db.add_file("active.txt", "txt", 100, ["Docs"])
+    temp_db.update_file_progress(
+        record["id"],
+        status="processing",
+        processing_stage="embedding",
+        progress_current=1,
+        progress_total=10,
+        progress_message="Embedding",
+    )
+
+    with patch("api.AsyncQdrantClient") as MockQdrant, \
+         patch("shared.is_file_processing_queued", side_effect=[True, False]) as mock_active:
+        mock_client = MagicMock()
+        mock_client.delete = AsyncMock()
+        mock_client.count = AsyncMock(return_value=MagicMock(count=0))
+        mock_client.close = AsyncMock()
+        MockQdrant.return_value = mock_client
+
+        resp = client.delete(f"/files/{record['id']}")
+
+    assert resp.status_code == 200
+    assert temp_db.get_file(record["id"]) is None
+    assert mock_active.call_count == 2
+    mock_client.delete.assert_awaited_once()
+    mock_client.count.assert_awaited_once()
 
 
 # ─── POST /files/bulk-delete ───────────────────────────────────────

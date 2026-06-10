@@ -141,6 +141,7 @@
   .badge-processing{background:rgba(88,166,255,0.14);color:#79b8ff;}
   .badge-crawling{background:rgba(88,166,255,0.14);color:#79b8ff;}
   .badge-running{background:rgba(88,166,255,0.14);color:#79b8ff;}
+  .badge-paused{background:rgba(210,153,34,0.14);color:#e3b341;}
   .badge-starting,.badge-restarting{background:rgba(210,153,34,0.14);color:#e3b341;}
   .badge-stopped{background:rgba(139,148,158,0.14);color:#c9d1d9;}
   .badge-skipped{background:rgba(139,148,158,0.14);color:#c9d1d9;}
@@ -692,8 +693,10 @@
         <div class="api-row"><span class="method put">PUT</span><span class="api-path">/urls/{id}</span><span class="api-desc">Update URL string, label, or deep crawl settings</span></div>
         <div class="api-row"><span class="method del">DEL</span><span class="api-path">/urls/{id}</span><span class="api-desc">Remove crawl URL and its vectors</span></div>
         <div class="api-row"><span class="method post">POST</span><span class="api-path">/urls/{id}/recrawl</span><span class="api-desc">Re-crawl a single URL in background</span></div>
+        <div class="api-row"><span class="method post">POST</span><span class="api-path">/urls/{id}/pause|resume</span><span class="api-desc">Pause or resume a single URL row</span></div>
         <div class="api-row"><span class="method post">POST</span><span class="api-path">/files</span><span class="api-desc">Upload document (multipart: file + labels; duplicate content returns 409)</span></div>
         <div class="api-row"><span class="method get">GET</span><span class="api-path">/files</span><span class="api-desc">List uploaded files with labels and chunk counts</span></div>
+        <div class="api-row"><span class="method post">POST</span><span class="api-path">/files/{id}/pause|resume</span><span class="api-desc">Pause or resume a single file row</span></div>
         <div class="api-row"><span class="method del">DEL</span><span class="api-path">/files/{id}</span><span class="api-desc">Delete file and its vectors from Qdrant</span></div>
         <div class="api-row"><span class="method post">POST</span><span class="api-path">/folders</span><span class="api-desc">Watch a folder recursively and ingest allowed files automatically</span></div>
         <div class="api-row"><span class="method get">GET</span><span class="api-path">/folders</span><span class="api-desc">List watched folders and watcher status</span></div>
@@ -963,6 +966,9 @@ function _renderFileTable(){
   tbody.innerHTML=data.map(f=>{
     const labels=(f.labels||[]).map(l=>`<span class="chip" style="font-size:0.7rem;padding:0.08rem 0.38rem">${esc(l)}</span>`).join(' ');
     const rowClass=[_selectedFiles.has(f.id)?'row-selected':'',_isFileActive(f)?'row-processing':''].filter(Boolean).join(' ');
+    const pauseBtn=f.status==='paused'
+      ? `<button class="btn btn-green btn-sm btn-icon" onclick="resumeFile(${f.id})" title="Resume">▶</button>`
+      : (_isFileActive(f)?`<button class="btn btn-ghost btn-sm btn-icon" onclick="pauseFile(${f.id})" title="Pause">⏸</button>`:'');
     return `<tr class="${rowClass}">
       <td class="col-cb"><input type="checkbox" ${_selectedFiles.has(f.id)?'checked':''} onchange="toggleFileSelect(${f.id},this.checked)"></td>
       <td class="mono">${esc(f.filename||'?')}</td>
@@ -972,7 +978,7 @@ function _renderFileTable(){
       <td>${_fmtFileStatus(f)}</td>
       <td class="col-num">${f.chunk_count??0}</td>
       <td class="text-muted" style="font-size:0.75rem;white-space:nowrap">${_fmtFileDate(f.created_at)}</td>
-      <td class="col-act"><button class="btn btn-danger btn-sm btn-icon" onclick="removeFile(${f.id})" title="Delete">🗑</button></td>
+      <td class="col-act">${pauseBtn}<button class="btn btn-danger btn-sm btn-icon" onclick="removeFile(${f.id})" title="Delete">🗑</button></td>
     </tr>`;
   }).join('');
   updateFileBulkBar();
@@ -1013,6 +1019,14 @@ async function uploadFile(){
 async function removeFile(id){
   if(!confirm('Delete this file and all its vectors?')) return;
   try{const r=await fetch(`/files/${id}`,{method:'DELETE'});if(!r.ok){const d=await r.json();alert(d.detail||'Delete failed');return;}_selectedFiles.delete(id);await loadSummary();await loadFiles();}
+  catch(e){alert('Network error: '+e.message);}
+}
+async function pauseFile(id){
+  try{const r=await fetch(`/files/${id}/pause`,{method:'POST'});if(!r.ok){const d=await r.json();alert(d.detail||'Pause failed');return;}await loadFiles();}
+  catch(e){alert('Network error: '+e.message);}
+}
+async function resumeFile(id){
+  try{const r=await fetch(`/files/${id}/resume`,{method:'POST'});if(!r.ok){const d=await r.json();alert(d.detail||'Resume failed');return;}await loadFiles();await loadSummary();}
   catch(e){alert('Network error: '+e.message);}
 }
 async function bulkDeleteFiles(){
@@ -1163,6 +1177,9 @@ function _renderUrlRow(u,isChild,isLast){
   const rowCls=(isChild?`child-row child-of-${u.parent_url_id} hidden`:'parent-row')+(_selectedUrlIds.has(u.id)?' row-selected':'')+(u.status==='crawling'?' row-crawling':'');
   const firstCell=isChild?`<span class="tree-twig">${isLast?'└─':'├─'}</span>${esc(u.url)}`:`${btnHtml}${esc(u.url)}`;
   const cbCell=isChild?'<td class="col-cb"></td>':`<td class="col-cb"><input type="checkbox" class="url-select" data-id="${u.id}" ${_selectedUrlIds.has(u.id)?'checked':''} onclick="toggleUrlSelect(${u.id},this.checked,event)"></td>`;
+  const pauseBtn=u.status==='paused'
+    ? `<button class="btn btn-green btn-sm btn-icon" onclick="resumeUrl(${u.id})" title="Resume">▶</button>`
+    : ((u.status==='pending'||u.status==='crawling')?`<button class="btn btn-ghost btn-sm btn-icon" onclick="pauseUrl(${u.id})" title="Pause">⏸</button>`:'');
   return `<tr class="${rowCls}" data-url-id="${u.id}">
     ${cbCell}
     <td class="mono" style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(u.url)}">${firstCell}</td>
@@ -1173,6 +1190,7 @@ function _renderUrlRow(u,isChild,isLast){
     <td class="text-muted" style="font-size:0.74rem;white-space:nowrap">${_fmtDate(u.created_at)}</td>
     <td class="col-act">
       ${isChild?'':` <button class="btn btn-ghost btn-sm btn-icon" onclick="recrawlUrl(${u.id})" title="Recrawl">↺</button>`}
+      ${pauseBtn}
       <button class="btn btn-danger btn-sm btn-icon" onclick="removeUrl(${u.id})" title="Delete">🗑</button>
     </td>
   </tr>`;
@@ -1247,6 +1265,20 @@ async function recrawlUrl(id){
     else _flashMsg(document.getElementById('urlMsg'),'Recrawl started','ok');
   }catch(e){alert(e.message);}
   finally{_deleting=false;}
+}
+async function pauseUrl(id){
+  try{
+    const r=await fetch(`/urls/${id}/pause`,{method:'POST'});
+    if(!r.ok){const d=await r.json();alert(d.detail||'Pause failed');return;}
+    await loadUrls();
+  }catch(e){alert(e.message);}
+}
+async function resumeUrl(id){
+  try{
+    const r=await fetch(`/urls/${id}/resume`,{method:'POST'});
+    if(!r.ok){const d=await r.json();alert(d.detail||'Resume failed');return;}
+    await loadUrls();await loadSummary();resumeCrawlProgress();
+  }catch(e){alert(e.message);}
 }
 
 // ── Bulk select ────────────────────────────────────────────────────

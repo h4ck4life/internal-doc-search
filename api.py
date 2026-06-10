@@ -1,5 +1,6 @@
 """FastAPI server exposing /search with two-stage retrieval + UI support endpoints."""
 
+import asyncio
 import hashlib
 import json
 import os
@@ -35,6 +36,7 @@ from store import (
     DuplicateFileError,
     init_db,
     list_urls,
+    get_url,
     add_url,
     update_url,
     delete_url,
@@ -409,7 +411,7 @@ async def ingest(mode: str = Query(default="all", pattern="^(all|new)$")):
         if not pending:
             return {"status": "no_urls", "message": "No pending or failed URLs to crawl. Use mode=all to recrawl completed URLs."}
     else:
-        pending = [u for u in url_list if u["status"] != "crawling"]
+        pending = [u for u in url_list if u["status"] not in ("crawling", "paused")]
 
     started = try_start_ingest_state({
         "status": "running",
@@ -634,6 +636,75 @@ async def recrawl_url_endpoint(url_id: int):
     return {"status": "started", "url_id": url_id, "url": url_list[0]["url"]}
 
 
+@app.post("/urls/{url_id}/pause")
+async def pause_url_endpoint(url_id: int):
+    """Pause one URL row. Active crawls stop that row at the next checkpoint."""
+    from store import update_url_progress
+
+    url = get_url(url_id)
+    if url is None:
+        raise HTTPException(status_code=404, detail="URL not found")
+    if url.get("status") == "completed":
+        raise HTTPException(status_code=409, detail="Completed URLs cannot be paused.")
+
+    update_url_progress(
+        url_id,
+        status="paused",
+        processing_stage="paused",
+        progress_current=url.get("progress_current") or 0,
+        progress_total=url.get("progress_total") or 0,
+        progress_message="Paused",
+        chunk_count=url.get("chunk_count") or 0,
+    )
+    return {"status": "paused", "url_id": url_id}
+
+
+@app.post("/urls/{url_id}/resume")
+async def resume_url_endpoint(url_id: int):
+    """Resume one paused URL. Starts it now if no crawl is already running."""
+    from store import update_url_progress
+
+    url = get_url(url_id)
+    if url is None:
+        raise HTTPException(status_code=404, detail="URL not found")
+    if url.get("status") != "paused":
+        return {"status": url.get("status"), "url_id": url_id, "message": "URL is not paused"}
+
+    update_url_progress(
+        url_id,
+        status="pending",
+        processing_stage="queued",
+        progress_current=0,
+        progress_total=0,
+        progress_message="Queued",
+    )
+
+    started = try_start_ingest_state({
+        "status": "running",
+        "total_urls": 1,
+        "current_url": 0,
+        "current_label": url.get("label", ""),
+        "chunks_stored": 0,
+        "message": f"Resuming: {url['url']}",
+    })
+    if not started:
+        return {
+            "status": "queued",
+            "url_id": url_id,
+            "message": "URL resumed and queued; another crawl is already running.",
+        }
+
+    t = threading.Thread(
+        target=_run_ingest_in_thread,
+        args=("new", url_id),
+        daemon=True,
+    )
+    set_ingest_thread(t)
+    t.start()
+
+    return {"status": "started", "url_id": url_id, "url": url["url"]}
+
+
 @app.get("/config")
 async def get_config_endpoint():
     """Return all app configuration values."""
@@ -830,34 +901,150 @@ async def get_files(
     return list_files(limit=limit, offset=offset)
 
 
+@app.post("/files/{file_id}/pause")
+async def pause_file_endpoint(file_id: int):
+    """Pause one queued or processing file row."""
+    from store import update_file_progress
+
+    existing = get_file(file_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    if existing.get("status") == "completed":
+        raise HTTPException(status_code=409, detail="Completed files cannot be paused.")
+    if existing.get("status") == "failed":
+        raise HTTPException(status_code=409, detail="Failed files cannot be paused.")
+
+    update_file_progress(
+        file_id,
+        status="paused",
+        processing_stage="paused",
+        progress_current=existing.get("progress_current") or 0,
+        progress_total=existing.get("progress_total") or 0,
+        progress_message="Paused",
+        chunk_count=existing.get("chunk_count") or 0,
+    )
+    return {"status": "paused", "file_id": file_id}
+
+
+@app.post("/files/{file_id}/resume")
+async def resume_file_endpoint(file_id: int):
+    """Resume one paused file by re-enqueueing its persisted upload bytes."""
+    from store import update_file_progress
+
+    existing = get_file(file_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    if existing.get("status") != "paused":
+        return {
+            "status": existing.get("status"),
+            "file_id": file_id,
+            "message": "File is not paused",
+        }
+
+    storage_path = existing.get("storage_path")
+    if not storage_path:
+        raise HTTPException(
+            status_code=409,
+            detail="Cannot resume this file because the queued upload bytes are missing.",
+        )
+    try:
+        with open(storage_path, "rb") as f:
+            content = f.read()
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cannot resume this file because {storage_path} is missing.",
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read queued upload: {e}")
+
+    expected_digest = existing.get("content_sha256")
+    if expected_digest and hashlib.sha256(content).hexdigest() != expected_digest:
+        raise HTTPException(status_code=409, detail="Queued upload checksum mismatch.")
+
+    update_file_progress(
+        file_id,
+        status="pending",
+        processing_stage="queued",
+        progress_current=0,
+        progress_total=0,
+        progress_message="Queued",
+        chunk_count=existing.get("chunk_count") or 0,
+    )
+    _enqueue_file_processing(
+        content,
+        existing["filename"],
+        existing.get("labels") or [],
+        file_id,
+        storage_path=storage_path,
+    )
+    return {"status": "queued", "file_id": file_id}
+
+
 @app.delete("/files/{file_id}")
 async def delete_file_endpoint(file_id: int):
     """Delete an uploaded file and all its vectors from Qdrant."""
     # Verify file exists before attempting Qdrant cleanup
     from store import get_file as _get_file
+    from store import update_file_progress
 
     existing = _get_file(file_id)
     if existing is None:
         raise HTTPException(status_code=404, detail="File not found")
 
+    if existing.get("status") in ("pending", "processing", "paused", "deleting"):
+        update_file_progress(
+            file_id,
+            status="deleting",
+            processing_stage="deleting",
+            progress_current=existing.get("progress_current") or 0,
+            progress_total=existing.get("progress_total") or 0,
+            progress_message="Deleting",
+            chunk_count=existing.get("chunk_count") or 0,
+        )
+        wait_seconds = float(os.environ.get("FILE_DELETE_CANCEL_WAIT_SECONDS", "30"))
+        deadline = asyncio.get_running_loop().time() + wait_seconds
+        while shared.is_file_processing_queued(file_id):
+            if asyncio.get_running_loop().time() >= deadline:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "File ingestion is still stopping. Retry delete in a moment "
+                        "so vectors can be removed after the worker exits."
+                    ),
+                )
+            await asyncio.sleep(0.1)
+
     # Clean up vectors from Qdrant BEFORE deleting the SQLite record.
     # If Qdrant is unreachable, the file row stays intact so the caller
     # can retry and no vectors are orphaned.
     client = AsyncQdrantClient(url=QDRANT_URL, check_compatibility=False)
+    file_filter = models.Filter(
+        must=[
+            models.FieldCondition(
+                key="file_id",
+                match=models.MatchValue(value=file_id),
+            )
+        ]
+    )
     try:
-        await client.delete(
-            collection_name=COLLECTION_NAME,
-            points_selector=models.FilterSelector(
-                filter=models.Filter(
-                    must=[
-                        models.FieldCondition(
-                            key="file_id",
-                            match=models.MatchValue(value=file_id),
-                        )
-                    ]
-                )
-            ),
-        )
+        remaining = None
+        for _attempt in range(3):
+            await client.delete(
+                collection_name=COLLECTION_NAME,
+                points_selector=models.FilterSelector(filter=file_filter),
+            )
+            count_result = await client.count(
+                collection_name=COLLECTION_NAME,
+                count_filter=file_filter,
+                exact=True,
+            )
+            remaining = int(getattr(count_result, "count", 0) or 0)
+            if remaining == 0:
+                break
+            await asyncio.sleep(0.25)
+        if remaining:
+            raise RuntimeError(f"{remaining} vector(s) still remain for file_id={file_id}")
     except Exception as e:
         import logging
         logger = logging.getLogger(__name__)
@@ -873,6 +1060,7 @@ async def delete_file_endpoint(file_id: int):
     record = delete_file(file_id)
     if record is None:
         raise HTTPException(status_code=404, detail="File not found")
+    shared._remove_upload_content(record.get("storage_path"))
 
     return {
         "deleted": True,

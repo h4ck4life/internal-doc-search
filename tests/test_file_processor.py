@@ -233,7 +233,9 @@ def _mock_process_file_deps(monkeypatch, mock_chunks, mock_embedding):
     monkeypatch.setitem(sys.modules, "qdrant_client", mock_qdrant)
 
     mock_store = MagicMock()
+    mock_store.get_file = MagicMock(return_value={"status": "processing"})
     mock_store.get_config = MagicMock(return_value="400")
+    mock_store.update_file_progress = MagicMock()
     mock_store.update_file_status = MagicMock()
     mock_store._normalize_labels = lambda x: [l for l in x if l]
     mock_store.resolve_chunk_config = MagicMock(return_value=(400, 80))
@@ -305,6 +307,23 @@ def test_process_file_success_flow(monkeypatch, temp_db):
     assert result["chunks_stored"] == 2
     assert mock_shared.bi_encoder.encode.call_count == 1  # batch encoding
     mock_client.upsert.assert_called_once()
+
+
+def test_process_file_stops_when_file_is_deleting(monkeypatch, temp_db):
+    """A deleting file exits at the next checkpoint without writing vectors."""
+    record = temp_db.add_file("delete-me.txt", "txt", 100, ["Docs"])
+    mock_chunks = [{"text": "chunk", "section_heading": ""}]
+    mock_embedding = [0.1] * 768
+
+    _mock_process_file_deps(monkeypatch, mock_chunks, mock_embedding)
+    import store
+
+    store.get_file.return_value = {"status": "deleting"}
+
+    from file_processor import process_file
+    result = process_file(b"some text", "delete-me.txt", ["Docs"], record["id"])
+
+    assert result["status"] == "deleting"
 
 
 def test_process_file_creates_qdrant_collection(monkeypatch, temp_db):
