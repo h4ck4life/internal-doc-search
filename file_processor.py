@@ -264,53 +264,12 @@ def process_file(
     # Normalize labels using the same utility as store.py
     from store import _normalize_labels as _norm
     labels = _norm(labels)
+    if not labels:
+        labels = [""]
 
-    # Embed in explicit batches so progress can be persisted while the model works.
-    chunk_texts = [cm["text"] for cm in chunks_with_meta]
-    batch_size = int(os.environ.get("FILE_EMBED_BATCH_SIZE", "32"))
-    batch_size = max(1, batch_size)
-    embeddings = []
-    progress("embedding", 0, total_chunks, f"Embedding 0/{total_chunks} chunks")
-    for start in range(0, total_chunks, batch_size):
-        batch = chunk_texts[start:start + batch_size]
-        batch_embeddings = shared.bi_encoder.encode(
-            batch,
-            batch_size=batch_size,
-            show_progress_bar=False,
-        ).tolist()
-        embeddings.extend(batch_embeddings)
-        done = min(start + len(batch), total_chunks)
-        progress("embedding", done, total_chunks, f"Embedding {done}/{total_chunks} chunks")
-
-    all_points = []
     total_points = total_chunks * len(labels)
-    progress("storing", 0, total_points, f"Preparing {total_points} vectors for Qdrant")
-    for chunk_idx, cm in enumerate(chunks_with_meta):
-        embedding = embeddings[chunk_idx]
-        for lbl in labels:
-            all_points.append(
-                qmodels.PointStruct(
-                    id=str(uuid.uuid4()),
-                    vector=embedding,
-                    payload={
-                        "url": f"file://{filename}",
-                        "label": lbl,
-                        "chunk_index": chunk_idx,
-                        "page_index": 0,
-                        "content": cm["text"],
-                        "page_title": filename,
-                        "section_heading": cm["section_heading"],
-                        "content_type": file_type,
-                        "total_chunks": total_chunks,
-                        "source_type": "file",
-                        "file_id": file_id,
-                        "filename": filename,
-                        "file_type": file_type,
-                    },
-                )
-            )
 
-    # Step 4: Ensure Qdrant collection exists, then upsert
+    # Step 4: Ensure Qdrant collection exists, then encode and upsert in batches.
     client = None
     try:
         progress("storing", 0, total_points, "Connecting to Qdrant")
@@ -334,35 +293,77 @@ def process_file(
                 ),
             )
 
-        if all_points:
+        if total_points:
+            embed_batch_size = _env_int("FILE_EMBED_BATCH_SIZE", 32)
             qdrant_batch_size = _env_int(
-                "FILE_QDRANT_BATCH_SIZE",
-                DEFAULT_FILE_QDRANT_BATCH_SIZE,
+                "FILE_QDRANT_BATCH_SIZE", DEFAULT_FILE_QDRANT_BATCH_SIZE,
             )
-            progress(
-                "storing",
-                0,
-                total_points,
-                f"Writing {total_points} vectors to Qdrant",
-            )
-            for start, points_batch in _iter_batches(all_points, qdrant_batch_size):
-                client.upsert(
-                    collection_name=shared.COLLECTION_NAME,
-                    points=points_batch,
+            stored_points = 0
+            progress("embedding", 0, total_chunks, f"Embedding 0/{total_chunks} chunks")
+            for start, chunk_batch in _iter_batches(chunks_with_meta, embed_batch_size):
+                batch_texts = [cm["text"] for cm in chunk_batch]
+                batch_embeddings = shared.bi_encoder.encode(
+                    batch_texts,
+                    batch_size=embed_batch_size,
+                    show_progress_bar=False,
+                ).tolist()
+                done_chunks = min(start + len(chunk_batch), total_chunks)
+                progress(
+                    "embedding",
+                    done_chunks,
+                    total_chunks,
+                    f"Embedding {done_chunks}/{total_chunks} chunks",
                 )
-                done = min(start + len(points_batch), total_points)
+
+                points_batch = []
+                for offset, (cm, embedding) in enumerate(zip(chunk_batch, batch_embeddings)):
+                    chunk_idx = start + offset
+                    for lbl in labels:
+                        points_batch.append(
+                            qmodels.PointStruct(
+                                id=str(uuid.uuid4()),
+                                vector=embedding,
+                                payload={
+                                    "url": f"file://{filename}",
+                                    "label": lbl,
+                                    "chunk_index": chunk_idx,
+                                    "page_index": 0,
+                                    "content": cm["text"],
+                                    "page_title": filename,
+                                    "section_heading": cm["section_heading"],
+                                    "content_type": file_type,
+                                    "total_chunks": total_chunks,
+                                    "source_type": "file",
+                                    "file_id": file_id,
+                                    "filename": filename,
+                                    "file_type": file_type,
+                                },
+                            )
+                        )
+
                 progress(
                     "storing",
-                    done,
+                    stored_points,
                     total_points,
-                    f"Stored {done}/{total_points} vectors",
+                    f"Writing {total_points} vectors to Qdrant",
                 )
+                for _, qdrant_points in _iter_batches(points_batch, qdrant_batch_size):
+                    client.upsert(
+                        collection_name=shared.COLLECTION_NAME,
+                        points=qdrant_points,
+                    )
+                    stored_points += len(qdrant_points)
+                    progress(
+                        "storing",
+                        stored_points,
+                        total_points,
+                        f"Stored {stored_points}/{total_points} vectors",
+                    )
             progress("storing", total_points, total_points, f"Stored {total_points} vectors")
     finally:
         if client is not None:
             client.close()
 
-    total_points = len(all_points)
     update_file_status(
         file_id,
         "completed",

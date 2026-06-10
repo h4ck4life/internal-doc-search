@@ -72,8 +72,23 @@ CRAWL_MAGIC = _env_bool("CRAWL_MAGIC", True)
 CRAWL_OVERRIDE_NAVIGATOR = _env_bool("CRAWL_OVERRIDE_NAVIGATOR", True)
 CRAWL_ENABLE_STEALTH = _env_bool("CRAWL_ENABLE_STEALTH", True)
 CRAWL_USER_AGENT_MODE = os.environ.get("CRAWL_USER_AGENT_MODE", "random")
+DEFAULT_QDRANT_TIMEOUT_SECONDS = 120
+DEFAULT_URL_QDRANT_BATCH_SIZE = 64
 
 _model: Optional[SentenceTransformer] = None
+
+
+def _env_int(name: str, default: int, minimum: int = 1) -> int:
+    try:
+        return max(minimum, int(os.environ.get(name, str(default))))
+    except (TypeError, ValueError):
+        logger.warning("Invalid %s value; using %s", name, default)
+        return default
+
+
+def _iter_batches(items: list, batch_size: int):
+    for start in range(0, len(items), batch_size):
+        yield start, items[start:start + batch_size]
 
 
 def _supported_kwargs(callable_obj, kwargs: Dict) -> Dict:
@@ -304,7 +319,11 @@ async def run_ingest(on_progress=None, only_pending: bool = False, url_id: Optio
             return {"status": "completed", "urls_crawled": 0, "chunks_stored": 0, "message": "No pending URLs — all already crawled"}
 
     model = _get_model()
-    client = AsyncQdrantClient(url=QDRANT_URL, check_compatibility=False)
+    client = AsyncQdrantClient(
+        url=QDRANT_URL,
+        check_compatibility=False,
+        timeout=_env_int("QDRANT_TIMEOUT_SECONDS", DEFAULT_QDRANT_TIMEOUT_SECONDS),
+    )
 
     # Read token-aware chunk config (new keys preferred, fall back to deprecated char keys)
     max_tokens = int(get_config("chunk_max_tokens", "0") or "0")
@@ -420,9 +439,9 @@ async def run_ingest(on_progress=None, only_pending: bool = False, url_id: Optio
                     url_labels = [""]  # always store at least one copy (with empty label)
 
                 # Process each crawled page — register discovered ones
-                all_points = []
                 total_chunks_stored = 0
                 chunk_jobs = []
+                total_points_stored = 0
 
                 for page_idx, (page_url, md_text) in enumerate(pages):
                     if not md_text or not md_text.strip():
@@ -503,20 +522,24 @@ async def run_ingest(on_progress=None, only_pending: bool = False, url_id: Optio
 
                 total_chunk_jobs = len(chunk_jobs)
                 if total_chunk_jobs:
-                    batch_size = int(os.environ.get("URL_EMBED_BATCH_SIZE", "32"))
-                    batch_size = max(1, batch_size)
+                    batch_size = _env_int("URL_EMBED_BATCH_SIZE", 32)
+                    qdrant_batch_size = _env_int(
+                        "URL_QDRANT_BATCH_SIZE",
+                        DEFAULT_URL_QDRANT_BATCH_SIZE,
+                    )
+                    total_points_expected = total_chunk_jobs * len(url_labels)
                     progress("embedding", 0, total_chunk_jobs, f"Embedding 0/{total_chunk_jobs} chunks")
-                    for start in range(0, total_chunk_jobs, batch_size):
-                        batch_jobs = chunk_jobs[start:start + batch_size]
+                    for start, batch_jobs in _iter_batches(chunk_jobs, batch_size):
                         batch_texts = [job["text"] for job in batch_jobs]
                         batch_embeddings = model.encode(
                             batch_texts,
                             batch_size=batch_size,
                             show_progress_bar=False,
                         ).tolist()
+                        points_batch = []
                         for job, embedding in zip(batch_jobs, batch_embeddings):
                             for lbl in url_labels:
-                                all_points.append(
+                                points_batch.append(
                                     models.PointStruct(
                                         id=str(uuid.uuid4()),
                                         vector=embedding,
@@ -541,10 +564,25 @@ async def run_ingest(on_progress=None, only_pending: bool = False, url_id: Optio
                             f"Embedding {done}/{total_chunk_jobs} chunks",
                         )
 
-                if all_points:
-                    progress("storing", 0, len(all_points), f"Writing {len(all_points)} vectors")
-                    await client.upsert(collection_name=COLLECTION_NAME, points=all_points)
-                    progress("storing", len(all_points), len(all_points), f"Stored {len(all_points)} vectors")
+                        if points_batch:
+                            progress(
+                                "storing",
+                                total_points_stored,
+                                total_points_expected,
+                                f"Writing {total_points_expected} vectors",
+                            )
+                            for _, qdrant_points in _iter_batches(points_batch, qdrant_batch_size):
+                                await client.upsert(
+                                    collection_name=COLLECTION_NAME,
+                                    points=qdrant_points,
+                                )
+                                total_points_stored += len(qdrant_points)
+                                progress(
+                                    "storing",
+                                    total_points_stored,
+                                    total_points_expected,
+                                    f"Stored {total_points_stored}/{total_points_expected} vectors",
+                                )
 
                 # Mark discovered pages as completed (they were registered as pending)
                 if deep_crawl:
@@ -559,16 +597,16 @@ async def run_ingest(on_progress=None, only_pending: bool = False, url_id: Optio
                 update_url_status(
                     url_id,
                     "completed",
-                    chunk_count=len(all_points),
+                    chunk_count=total_points_stored,
                     processing_stage="completed",
-                    progress_current=len(all_points),
-                    progress_total=len(all_points),
-                    progress_message=f"Indexed {total_chunks_stored} chunks as {len(all_points)} vectors",
+                    progress_current=total_points_stored,
+                    progress_total=total_points_stored,
+                    progress_message=f"Indexed {total_chunks_stored} chunks as {total_points_stored} vectors",
                 )
                 total_urls += 1
-                total_chunks += len(all_points)
+                total_chunks += total_points_stored
                 pages_info = f" ({len(pages)} pages)" if len(pages) > 1 else ""
-                logger.info("  Saved %d chunks from %s%s", len(all_points), url, pages_info)
+                logger.info("  Saved %d chunks from %s%s", total_points_stored, url, pages_info)
 
                 if on_progress:
                     await on_progress(total_urls, total_pending, url_entry.get("label", url), total_chunks)

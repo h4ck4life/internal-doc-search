@@ -341,6 +341,27 @@ def test_process_file_multiple_labels(monkeypatch, temp_db):
     assert result["chunks_stored"] == 2  # 1 chunk x 2 labels
 
 
+def test_process_file_no_labels_stores_unlabeled_points(monkeypatch, temp_db):
+    """Files without labels still get indexed for unfiltered search."""
+    record = temp_db.add_file("unlabeled.txt", "txt", 100, [])
+    mock_chunks = [{"text": "single chunk", "section_heading": ""}]
+    mock_embedding = [[0.5] * 768]
+
+    _, mock_qdrant, _ = _mock_process_file_deps(
+        monkeypatch, mock_chunks, mock_embedding,
+    )
+    mock_client = MagicMock()
+    mock_client.get_collections.return_value.collections = [MagicMock(name="internal_docs")]
+    mock_qdrant.QdrantClient.return_value = mock_client
+
+    from file_processor import process_file
+    result = process_file(b"text", "unlabeled.txt", [], record["id"])
+
+    assert result["chunks_stored"] == 1
+    assert mock_client.upsert.call_count == 1
+    assert mock_qdrant.models.PointStruct.call_args.kwargs["payload"]["label"] == ""
+
+
 def test_process_file_upserts_qdrant_points_in_batches(monkeypatch, temp_db):
     """Large file ingests should not send every point in one HTTP request."""
     record = temp_db.add_file("batched.txt", "txt", 100, ["Docs"])
@@ -371,3 +392,43 @@ def test_process_file_upserts_qdrant_points_in_batches(monkeypatch, temp_db):
         for call in mock_client.upsert.call_args_list
     ]
     assert batch_lengths == [2, 2, 1]
+
+
+def test_process_file_streams_encoded_batches_to_qdrant(monkeypatch, temp_db):
+    """Each encoded batch should be stored before the next batch is encoded."""
+    record = temp_db.add_file("streamed.txt", "txt", 100, ["Docs"])
+    mock_chunks = [
+        {"text": f"chunk {idx}", "section_heading": ""}
+        for idx in range(4)
+    ]
+
+    mock_shared, mock_qdrant, _ = _mock_process_file_deps(
+        monkeypatch, mock_chunks, [[0.0] * 768],
+    )
+    monkeypatch.setenv("FILE_EMBED_BATCH_SIZE", "2")
+    monkeypatch.setenv("FILE_QDRANT_BATCH_SIZE", "64")
+    mock_client = MagicMock()
+    mock_col = MagicMock()
+    mock_col.name = "internal_docs"
+    mock_client.get_collections.return_value.collections = [mock_col]
+    mock_qdrant.QdrantClient.return_value = mock_client
+
+    encode_calls = []
+
+    def encode_side_effect(batch, **_kwargs):
+        encode_calls.append(list(batch))
+        if len(encode_calls) == 2:
+            assert mock_client.upsert.call_count == 1
+        encoded = MagicMock()
+        encoded.tolist.return_value = [[float(len(encode_calls))] * 768 for _ in batch]
+        return encoded
+
+    mock_shared.bi_encoder.encode.side_effect = encode_side_effect
+
+    from file_processor import process_file
+    result = process_file(b"text", "streamed.txt", ["Docs"], record["id"])
+
+    assert result["status"] == "completed"
+    assert result["chunks_stored"] == 4
+    assert encode_calls == [["chunk 0", "chunk 1"], ["chunk 2", "chunk 3"]]
+    assert mock_client.upsert.call_count == 2
