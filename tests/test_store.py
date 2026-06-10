@@ -169,11 +169,23 @@ def test_delete_nonexistent_url(temp_db):
 def test_update_url_status(temp_db):
     """update_url_status sets crawl results."""
     result = temp_db.add_url("https://example.com/docs")
-    temp_db.update_url_status(result["id"], "completed", chunk_count=5)
+    temp_db.update_url_status(
+        result["id"],
+        "completed",
+        chunk_count=5,
+        processing_stage="completed",
+        progress_current=5,
+        progress_total=5,
+        progress_message="Indexed",
+    )
 
     urls = temp_db.list_urls()
     assert urls[0]["status"] == "completed"
     assert urls[0]["chunk_count"] == 5
+    assert urls[0]["processing_stage"] == "completed"
+    assert urls[0]["progress_current"] == 5
+    assert urls[0]["progress_total"] == 5
+    assert urls[0]["progress_message"] == "Indexed"
     assert urls[0]["last_crawled"] is not None
     assert urls[0]["error_message"] is None
 
@@ -186,6 +198,47 @@ def test_update_url_status_failed(temp_db):
     urls = temp_db.list_urls()
     assert urls[0]["status"] == "failed"
     assert urls[0]["error_message"] == "Timeout"
+
+
+def test_update_url_progress(temp_db):
+    """update_url_progress records in-flight crawl progress without last_crawled."""
+    result = temp_db.add_url("https://example.com/docs")
+    temp_db.update_url_progress(
+        result["id"],
+        processing_stage="embedding",
+        progress_current=3,
+        progress_total=10,
+        progress_message="Embedding 3/10 chunks",
+    )
+
+    urls = temp_db.list_urls()
+    assert urls[0]["status"] == "crawling"
+    assert urls[0]["processing_stage"] == "embedding"
+    assert urls[0]["progress_current"] == 3
+    assert urls[0]["progress_total"] == 10
+    assert urls[0]["progress_message"] == "Embedding 3/10 chunks"
+    assert urls[0]["last_crawled"] is None
+
+
+def test_reset_stale_crawling_urls(temp_db):
+    """reset_stale_crawling_urls returns interrupted crawling rows to pending."""
+    crawling = temp_db.add_url("https://example.com/crawling")
+    done = temp_db.add_url("https://example.com/done")
+    temp_db.update_url_progress(
+        crawling["id"],
+        processing_stage="fetching",
+        progress_current=0,
+        progress_total=1,
+        progress_message="Fetching",
+    )
+    temp_db.update_url_status(done["id"], "completed", chunk_count=1)
+
+    assert temp_db.reset_stale_crawling_urls() == 1
+    urls = {u["url"]: u for u in temp_db.list_urls()}
+    assert urls["https://example.com/crawling"]["status"] == "pending"
+    assert urls["https://example.com/crawling"]["processing_stage"] == "queued"
+    assert urls["https://example.com/crawling"]["progress_message"] == "Reset after interrupted crawl"
+    assert urls["https://example.com/done"]["status"] == "completed"
 
 
 def test_get_config_with_default(temp_db):

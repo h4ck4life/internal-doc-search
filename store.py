@@ -45,6 +45,10 @@ def init_db() -> None:
                 status TEXT DEFAULT 'pending',
                 last_crawled TEXT,
                 chunk_count INTEGER DEFAULT 0,
+                processing_stage TEXT DEFAULT 'queued',
+                progress_current INTEGER DEFAULT 0,
+                progress_total INTEGER DEFAULT 0,
+                progress_message TEXT DEFAULT '',
                 error_message TEXT,
                 deep_crawl INTEGER DEFAULT 0,
                 deep_crawl_max_depth INTEGER DEFAULT 1,
@@ -141,6 +145,10 @@ def init_db() -> None:
         _migrate_add_column(conn, "urls", "deep_crawl_url_pattern", "TEXT DEFAULT ''")
         _migrate_add_column(conn, "urls", "deep_crawl_exclude_pattern", "TEXT DEFAULT ''")
         _migrate_add_column(conn, "urls", "parent_url_id", "INTEGER REFERENCES urls(id)")
+        _migrate_add_column(conn, "urls", "processing_stage", "TEXT DEFAULT 'queued'")
+        _migrate_add_column(conn, "urls", "progress_current", "INTEGER DEFAULT 0")
+        _migrate_add_column(conn, "urls", "progress_total", "INTEGER DEFAULT 0")
+        _migrate_add_column(conn, "urls", "progress_message", "TEXT DEFAULT ''")
         _migrate_add_column(conn, "files", "content_sha256", "TEXT")
         _migrate_add_column(conn, "files", "storage_path", "TEXT")
         _migrate_add_column(conn, "files", "processing_stage", "TEXT DEFAULT 'queued'")
@@ -534,15 +542,98 @@ def update_url_status(
     status: str,
     chunk_count: int = 0,
     error_message: Optional[str] = None,
+    processing_stage: Optional[str] = None,
+    progress_current: Optional[int] = None,
+    progress_total: Optional[int] = None,
+    progress_message: Optional[str] = None,
 ) -> None:
     """Update crawl status for a URL after ingestion."""
     conn = _get_conn()
     try:
+        assignments = [
+            "status = ?",
+            "last_crawled = ?",
+            "chunk_count = ?",
+            "error_message = ?",
+        ]
+        values: list[Any] = [status, _now_iso(), chunk_count, error_message]
+        if processing_stage is not None:
+            assignments.append("processing_stage = ?")
+            values.append(processing_stage)
+        if progress_current is not None:
+            assignments.append("progress_current = ?")
+            values.append(progress_current)
+        if progress_total is not None:
+            assignments.append("progress_total = ?")
+            values.append(progress_total)
+        if progress_message is not None:
+            assignments.append("progress_message = ?")
+            values.append(progress_message)
+        values.append(url_id)
         conn.execute(
-            "UPDATE urls SET status=?, last_crawled=?, chunk_count=?, error_message=? WHERE id=?",
-            (status, _now_iso(), chunk_count, error_message, url_id),
+            f"UPDATE urls SET {', '.join(assignments)} WHERE id = ?",
+            values,
         )
         conn.commit()
+    finally:
+        conn.close()
+
+
+def update_url_progress(
+    url_id: int,
+    *,
+    status: str = "crawling",
+    processing_stage: str,
+    progress_current: int = 0,
+    progress_total: int = 0,
+    progress_message: str = "",
+    chunk_count: Optional[int] = None,
+    error_message: Optional[str] = None,
+) -> None:
+    """Update in-flight URL crawl progress without changing last_crawled."""
+    conn = _get_conn()
+    try:
+        assignments = [
+            "status = ?",
+            "processing_stage = ?",
+            "progress_current = ?",
+            "progress_total = ?",
+            "progress_message = ?",
+            "error_message = ?",
+        ]
+        values: list[Any] = [
+            status,
+            processing_stage,
+            progress_current,
+            progress_total,
+            progress_message,
+            error_message,
+        ]
+        if chunk_count is not None:
+            assignments.append("chunk_count = ?")
+            values.append(chunk_count)
+        values.append(url_id)
+        conn.execute(
+            f"UPDATE urls SET {', '.join(assignments)} WHERE id = ?",
+            values,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def reset_stale_crawling_urls() -> int:
+    """Reset URLs left in crawling state after an interrupted server run."""
+    conn = _get_conn()
+    try:
+        cur = conn.execute(
+            "UPDATE urls SET status='pending', processing_stage='queued', "
+            "progress_current=0, progress_total=0, "
+            "progress_message='Reset after interrupted crawl' "
+            "WHERE status='crawling'"
+        )
+        conn.commit()
+        return cur.rowcount
     finally:
         conn.close()
 

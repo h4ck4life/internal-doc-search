@@ -738,7 +738,7 @@
 let searchLimit=7,pollTimer=null,knownLabels=[];
 addEventListener('DOMContentLoaded',()=>{
   loadSummary();loadUrls();loadConfig();loadLabels();initChipInput();initCopyButtons();loadFiles();switchTab('search');
-  checkHealth();
+  checkHealth();resumeCrawlProgress();
   // '/' shortcut focuses search when no input is focused
   document.addEventListener('keydown',e=>{
     if(e.key==='/'&&document.activeElement.tagName!=='INPUT'&&document.activeElement.tagName!=='TEXTAREA'&&document.activeElement.tagName!=='SELECT'){
@@ -789,19 +789,7 @@ async function triggerCrawl(mode){
     else if(d.status==='no_urls'){el.innerHTML=_crawlBanner('⚠️','Nothing to crawl',d.message||'No pending or failed URLs. Use Recrawl All to re-index completed URLs.','warning');el.classList.remove('hidden');resetCrawlBtns();}
     else{
       const total=d.total_urls||0;
-      el.innerHTML=`<div class="crawl-banner running">
-        <div class="crawl-banner-header">
-          <span>⏳</span>
-          <span class="crawl-banner-title">Crawling ${total} URL(s) <span style="font-size:0.72rem;opacity:0.5;font-weight:400">mode=${mode}</span></span>
-          <button class="crawl-banner-close" onclick="var c=this.closest('.crawl-banner');c.remove();clearInterval(pollTimer);pollTimer=null;resetCrawlBtns()">✕</button>
-        </div>
-        <div class="crawl-banner-stats">
-          <div class="crawl-banner-stat"><span class="val" id="crawlStatDone">0</span> done</div>
-          <div class="crawl-banner-stat"><span class="val" id="crawlStatChunks">0</span> chunks</div>
-        </div>
-        <div class="progress-bar"><div class="progress-fill" id="progressFill" style="width:0%"></div></div>
-        <div class="progress-label"><span id="progressText">Starting…</span><span id="progressPct">0%</span></div>
-      </div>`;
+      renderCrawlProgress({total_urls:total,current_url:0,chunks_stored:0,message:'Starting…'},mode);
       el.classList.remove('hidden');startPolling();
     }
   }catch(e){el.innerHTML=_crawlBanner('✗','Error',esc(e.message),'failed');el.classList.remove('hidden');resetCrawlBtns();}
@@ -809,6 +797,35 @@ async function triggerCrawl(mode){
 function resetCrawlBtns(){
   document.getElementById('crawlBtnAll').disabled=false;document.getElementById('crawlBtnAll').innerHTML='↺ Recrawl all';
   document.getElementById('crawlBtnNew').disabled=false;document.getElementById('crawlBtnNew').innerHTML='+ Crawl pending';
+}
+function renderCrawlProgress(s={},mode=''){
+  const el=document.getElementById('crawlMsg');
+  const total=s.total_urls||0,pct=total>0?Math.round(((s.current_url||0)/total)*100):0;
+  el.innerHTML=`<div class="crawl-banner running">
+    <div class="crawl-banner-header">
+      <span>⏳</span>
+      <span class="crawl-banner-title">Crawling ${total} URL(s) ${mode?`<span style="font-size:0.72rem;opacity:0.5;font-weight:400">mode=${esc(mode)}</span>`:''}</span>
+      <button class="crawl-banner-close" onclick="var c=this.closest('.crawl-banner');c.remove();clearInterval(pollTimer);pollTimer=null;resetCrawlBtns()">✕</button>
+    </div>
+    <div class="crawl-banner-stats">
+      <div class="crawl-banner-stat"><span class="val" id="crawlStatDone">${s.current_url||0}</span> done</div>
+      <div class="crawl-banner-stat"><span class="val" id="crawlStatChunks">${s.chunks_stored||0}</span> chunks</div>
+    </div>
+    <div class="progress-bar"><div class="progress-fill" id="progressFill" style="width:${pct}%"></div></div>
+    <div class="progress-label"><span id="progressText">${esc(s.message||'Starting…')}</span><span id="progressPct">${pct}%</span></div>
+  </div>`;
+  el.classList.remove('hidden');
+}
+async function resumeCrawlProgress(){
+  try{
+    const s=await (await fetch('/ingest/status')).json();
+    if(s.running){
+      document.getElementById('crawlBtnAll').disabled=true;document.getElementById('crawlBtnAll').innerHTML='<span class="spinner"></span>';
+      document.getElementById('crawlBtnNew').disabled=true;document.getElementById('crawlBtnNew').innerHTML='<span class="spinner"></span>';
+      renderCrawlProgress(s);
+      startPolling();
+    }
+  }catch(e){}
 }
 function startPolling(){
   if(pollTimer) clearInterval(pollTimer);
@@ -886,6 +903,22 @@ function _fmtFileStatus(f){
   const count=total>0?`${current}/${total}`:(status==='completed'?'Done':'Queued');
   if(status==='completed'||status==='failed'){
     return `<div><span class="badge badge-${esc(status)}">${esc(status)}</span>${msg?`<div class="file-progress-msg" title="${esc(msg)}">${esc(msg)}</div>`:''}</div>`;
+  }
+  return `<div class="file-progress">
+    <div class="file-progress-top"><span class="badge badge-${esc(status)}">${esc(stage)}</span><span>${count}</span></div>
+    <div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div>
+    <div class="file-progress-msg" title="${esc(msg)}">${esc(msg)}</div>
+  </div>`;
+}
+function _fmtUrlStatus(u){
+  const status=u.status||'pending';
+  const stage=u.processing_stage||status;
+  const current=Number(u.progress_current||0),total=Number(u.progress_total||0);
+  const pct=total>0?Math.max(0,Math.min(100,Math.round((current/total)*100))):(status==='completed'?100:0);
+  const msg=u.progress_message||u.error_message||(status==='completed'?'Indexed':stage);
+  const count=total>0?`${current}/${total}`:(status==='completed'?'Done':'Queued');
+  if(status==='completed'||status==='failed'||status==='pending'){
+    return `<div><span class="badge badge-${esc(status)}">${esc(status)}</span>${msg&&status!=='pending'?`<div class="file-progress-msg" title="${esc(msg)}">${esc(msg)}</div>`:''}</div>`;
   }
   return `<div class="file-progress">
     <div class="file-progress-top"><span class="badge badge-${esc(status)}">${esc(stage)}</span><span>${count}</span></div>
@@ -1118,7 +1151,7 @@ function _renderUrlRow(u,isChild,isLast){
   const labelsArr=(u.labels&&u.labels.length)?u.labels:(u.label?[u.label]:[]);
   const labelsText=labelsArr.length?labelsArr.join(', '):'—';
   const btnHtml=u._expandBtn||'';
-  const rowCls=(isChild?`child-row child-of-${u.parent_url_id} hidden`:'parent-row')+(_selectedUrlIds.has(u.id)?' row-selected':'');
+  const rowCls=(isChild?`child-row child-of-${u.parent_url_id} hidden`:'parent-row')+(_selectedUrlIds.has(u.id)?' row-selected':'')+(u.status==='crawling'?' row-crawling':'');
   const firstCell=isChild?`<span class="tree-twig">${isLast?'└─':'├─'}</span>${esc(u.url)}`:`${btnHtml}${esc(u.url)}`;
   const cbCell=isChild?'<td class="col-cb"></td>':`<td class="col-cb"><input type="checkbox" class="url-select" data-id="${u.id}" ${_selectedUrlIds.has(u.id)?'checked':''} onclick="toggleUrlSelect(${u.id},this.checked,event)"></td>`;
   return `<tr class="${rowCls}" data-url-id="${u.id}">
@@ -1126,7 +1159,7 @@ function _renderUrlRow(u,isChild,isLast){
     <td class="mono" style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(u.url)}">${firstCell}</td>
     <td style="max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(labelsText)}">${esc(trunc(labelsText,28))}</td>
     <td style="font-size:0.72rem;max-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(patInfo)}">${dc}${patInfo?`<br><span style="opacity:0.45;font-size:0.65rem">${esc(trunc(patInfo,18))}</span>`:''}</td>
-    <td><span class="badge badge-${u.status}">${u.status}</span></td>
+    <td>${_fmtUrlStatus(u)}</td>
     <td class="col-num">${u.chunk_count??0}</td>
     <td class="text-muted" style="font-size:0.74rem;white-space:nowrap">${_fmtDate(u.created_at)}</td>
     <td class="col-act">

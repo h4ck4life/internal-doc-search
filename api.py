@@ -74,6 +74,13 @@ async def app_lifespan(app: FastAPI):
     )
     _load_models()
     init_db()
+    from store import reset_stale_crawling_urls
+    stale_urls = reset_stale_crawling_urls()
+    if stale_urls:
+        import logging
+        logging.getLogger(__name__).info(
+            "Reset %d stale crawling URL(s)", stale_urls,
+        )
     recovered = shared.recover_queued_file_processing()
     if recovered:
         import logging

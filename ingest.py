@@ -23,6 +23,7 @@ from chunker import chunk_text_with_metadata, extract_section_headings
 from store import (
     init_db,
     list_urls,
+    update_url_progress,
     update_url_status,
     get_config,
 )
@@ -346,7 +347,24 @@ async def run_ingest(on_progress=None, only_pending: bool = False, url_id: Optio
                 url_pattern = url_entry.get("deep_crawl_url_pattern", "") or ""
                 exclude_pattern = url_entry.get("deep_crawl_exclude_pattern", "") or ""
 
-                update_url_status(url_id, "crawling")
+                def progress(
+                    stage: str,
+                    current: int = 0,
+                    total: int = 0,
+                    message: str = "",
+                    *,
+                    chunk_count: Optional[int] = None,
+                ) -> None:
+                    update_url_progress(
+                        url_id,
+                        processing_stage=stage,
+                        progress_current=current,
+                        progress_total=total,
+                        progress_message=message,
+                        chunk_count=chunk_count,
+                    )
+
+                progress("fetching", 0, 1, "Fetching page")
                 crawl_type = f"deep (max_depth={max_depth})" if deep_crawl else "single page"
                 if url_pattern:
                     crawl_type += f" include={url_pattern}"
@@ -360,15 +378,32 @@ async def run_ingest(on_progress=None, only_pending: bool = False, url_id: Optio
                         url_pattern=url_pattern, exclude_pattern=exclude_pattern,
                     )
                 except Exception as e:
-                    update_url_status(url_id, "failed", error_message=str(e))
+                    update_url_status(
+                        url_id,
+                        "failed",
+                        error_message=str(e),
+                        processing_stage="failed",
+                        progress_current=0,
+                        progress_total=0,
+                        progress_message=f"Fetch failed: {e}",
+                    )
                     errors.append({"url": url, "error": str(e)})
                     logger.error("  FAILED: %s", e)
                     continue
 
                 if not pages or all(not md or not md.strip() for _, md in pages):
-                    update_url_status(url_id, "completed", chunk_count=0)
+                    update_url_status(
+                        url_id,
+                        "completed",
+                        chunk_count=0,
+                        processing_stage="completed",
+                        progress_current=1,
+                        progress_total=1,
+                        progress_message="No content found",
+                    )
                     logger.info("  Empty page(s), skipped")
                     continue
+                progress("fetching", len(pages), len(pages), f"Fetched {len(pages)} page(s)")
 
                 # Labels inherited from the seed URL
                 url_labels = url_entry.get("labels") or ([label] if label else [])
@@ -378,10 +413,17 @@ async def run_ingest(on_progress=None, only_pending: bool = False, url_id: Optio
                 # Process each crawled page — register discovered ones
                 all_points = []
                 total_chunks_stored = 0
+                chunk_jobs = []
 
                 for page_idx, (page_url, md_text) in enumerate(pages):
                     if not md_text or not md_text.strip():
                         continue
+                    progress(
+                        "chunking",
+                        page_idx,
+                        len(pages),
+                        f"Chunking page {page_idx + 1}/{len(pages)}",
+                    )
 
                     # Determine the URL to store chunks under + track page registration
                     if page_url == url:
@@ -431,34 +473,69 @@ async def run_ingest(on_progress=None, only_pending: bool = False, url_id: Optio
                         continue
 
                     total_unique_chunks = len(chunks_with_meta)
-
-                    # Create points for this page
                     for chunk_idx, cm in enumerate(chunks_with_meta):
-                        chunk_text_content = cm["text"]
-                        section_heading = cm["section_heading"]
-                        embedding = model.encode(chunk_text_content).tolist()
-                        for lbl in url_labels:
-                            all_points.append(
-                                models.PointStruct(
-                                    id=str(uuid.uuid4()),
-                                    vector=embedding,
-                                    payload={
-                                        "url": store_url,
-                                        "label": lbl,
-                                        "chunk_index": chunk_idx,
-                                        "page_index": page_idx,
-                                        "content": chunk_text_content,
-                                        "page_title": page_title,
-                                        "section_heading": section_heading,
-                                        "content_type": content_type,
-                                        "total_chunks": total_unique_chunks,
-                                    },
-                                )
-                            )
+                        chunk_jobs.append({
+                            "text": cm["text"],
+                            "section_heading": cm["section_heading"],
+                            "store_url": store_url,
+                            "chunk_index": chunk_idx,
+                            "page_index": page_idx,
+                            "page_title": page_title,
+                            "content_type": content_type,
+                            "total_chunks": total_unique_chunks,
+                        })
                     total_chunks_stored += len(chunks_with_meta)
+                    progress(
+                        "chunking",
+                        page_idx + 1,
+                        len(pages),
+                        f"Created {total_chunks_stored} chunks",
+                    )
+
+                total_chunk_jobs = len(chunk_jobs)
+                if total_chunk_jobs:
+                    batch_size = int(os.environ.get("URL_EMBED_BATCH_SIZE", "32"))
+                    batch_size = max(1, batch_size)
+                    progress("embedding", 0, total_chunk_jobs, f"Embedding 0/{total_chunk_jobs} chunks")
+                    for start in range(0, total_chunk_jobs, batch_size):
+                        batch_jobs = chunk_jobs[start:start + batch_size]
+                        batch_texts = [job["text"] for job in batch_jobs]
+                        batch_embeddings = model.encode(
+                            batch_texts,
+                            batch_size=batch_size,
+                            show_progress_bar=False,
+                        ).tolist()
+                        for job, embedding in zip(batch_jobs, batch_embeddings):
+                            for lbl in url_labels:
+                                all_points.append(
+                                    models.PointStruct(
+                                        id=str(uuid.uuid4()),
+                                        vector=embedding,
+                                        payload={
+                                            "url": job["store_url"],
+                                            "label": lbl,
+                                            "chunk_index": job["chunk_index"],
+                                            "page_index": job["page_index"],
+                                            "content": job["text"],
+                                            "page_title": job["page_title"],
+                                            "section_heading": job["section_heading"],
+                                            "content_type": job["content_type"],
+                                            "total_chunks": job["total_chunks"],
+                                        },
+                                    )
+                                )
+                        done = min(start + len(batch_jobs), total_chunk_jobs)
+                        progress(
+                            "embedding",
+                            done,
+                            total_chunk_jobs,
+                            f"Embedding {done}/{total_chunk_jobs} chunks",
+                        )
 
                 if all_points:
+                    progress("storing", 0, len(all_points), f"Writing {len(all_points)} vectors")
                     await client.upsert(collection_name=COLLECTION_NAME, points=all_points)
+                    progress("storing", len(all_points), len(all_points), f"Stored {len(all_points)} vectors")
 
                 # Mark discovered pages as completed (they were registered as pending)
                 if deep_crawl:
@@ -470,7 +547,15 @@ async def run_ingest(on_progress=None, only_pending: bool = False, url_id: Optio
                                 update_url_status(existing[0]["id"], "completed",
                                                   chunk_count=existing[0].get("chunk_count", 0))
 
-                update_url_status(url_id, "completed", chunk_count=len(all_points))
+                update_url_status(
+                    url_id,
+                    "completed",
+                    chunk_count=len(all_points),
+                    processing_stage="completed",
+                    progress_current=len(all_points),
+                    progress_total=len(all_points),
+                    progress_message=f"Indexed {total_chunks_stored} chunks as {len(all_points)} vectors",
+                )
                 total_urls += 1
                 total_chunks += len(all_points)
                 pages_info = f" ({len(pages)} pages)" if len(pages) > 1 else ""
