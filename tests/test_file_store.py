@@ -18,6 +18,7 @@ def test_init_db_creates_files_table(temp_db):
         assert "file_labels" in table_names
         file_cols = conn.execute("PRAGMA table_info(files)").fetchall()
         assert "content_sha256" in [c["name"] for c in file_cols]
+        assert "storage_path" in [c["name"] for c in file_cols]
         assert "processing_stage" in [c["name"] for c in file_cols]
         assert "progress_current" in [c["name"] for c in file_cols]
         assert "progress_total" in [c["name"] for c in file_cols]
@@ -49,8 +50,11 @@ def test_add_file_with_labels_list(temp_db):
 
 def test_add_file_stores_content_digest(temp_db):
     """add_file can store and return a content SHA-256 digest."""
-    record = temp_db.add_file("guide.pdf", "pdf", 2048, ["Docs"], SHA_A)
+    record = temp_db.add_file(
+        "guide.pdf", "pdf", 2048, ["Docs"], SHA_A, storage_path="data/uploads/a.pdf",
+    )
     assert record["content_sha256"] == SHA_A
+    assert record["storage_path"] == "data/uploads/a.pdf"
 
     fetched = temp_db.get_file_by_digest(SHA_A)
     assert fetched is not None
@@ -171,6 +175,38 @@ def test_update_file_progress(temp_db):
     assert updated["progress_current"] == 8
     assert updated["progress_total"] == 20
     assert updated["progress_message"] == "Embedding 8/20 chunks"
+
+
+def test_list_recoverable_files(temp_db):
+    """Recoverable files are active uploads with persisted bytes."""
+    pending = temp_db.add_file(
+        "pending.pdf", "pdf", 10, ["Docs"], "b" * 64, storage_path="data/uploads/pending.pdf",
+    )
+    completed = temp_db.add_file(
+        "done.pdf", "pdf", 10, ["Docs"], "c" * 64, storage_path="data/uploads/done.pdf",
+    )
+    missing_path = temp_db.add_file("missing.pdf", "pdf", 10, ["Docs"], "d" * 64)
+    temp_db.update_file_status(completed["id"], "completed", chunk_count=1)
+
+    recoverable = temp_db.list_recoverable_files()
+    assert [f["id"] for f in recoverable] == [pending["id"]]
+    assert missing_path["id"] not in [f["id"] for f in recoverable]
+
+
+def test_get_active_file_ingest_count(temp_db):
+    """Active count includes pending and processing files only."""
+    pending = temp_db.add_file("pending.pdf", "pdf", 10, ["Docs"])
+    processing = temp_db.add_file("processing.pdf", "pdf", 10, ["Docs"])
+    completed = temp_db.add_file("done.pdf", "pdf", 10, ["Docs"])
+    temp_db.update_file_progress(
+        processing["id"],
+        processing_stage="embedding",
+        progress_current=1,
+        progress_total=2,
+    )
+    temp_db.update_file_status(completed["id"], "completed", chunk_count=1)
+
+    assert temp_db.get_active_file_ingest_count() == 2
 
 
 def test_list_files_pagination(temp_db):

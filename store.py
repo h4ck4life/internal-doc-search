@@ -73,6 +73,7 @@ def init_db() -> None:
                 file_type TEXT NOT NULL,
                 file_size INTEGER DEFAULT 0,
                 content_sha256 TEXT,
+                storage_path TEXT,
                 status TEXT DEFAULT 'pending',
                 chunk_count INTEGER DEFAULT 0,
                 processing_stage TEXT DEFAULT 'queued',
@@ -141,6 +142,7 @@ def init_db() -> None:
         _migrate_add_column(conn, "urls", "deep_crawl_exclude_pattern", "TEXT DEFAULT ''")
         _migrate_add_column(conn, "urls", "parent_url_id", "INTEGER REFERENCES urls(id)")
         _migrate_add_column(conn, "files", "content_sha256", "TEXT")
+        _migrate_add_column(conn, "files", "storage_path", "TEXT")
         _migrate_add_column(conn, "files", "processing_stage", "TEXT DEFAULT 'queued'")
         _migrate_add_column(conn, "files", "progress_current", "INTEGER DEFAULT 0")
         _migrate_add_column(conn, "files", "progress_total", "INTEGER DEFAULT 0")
@@ -634,6 +636,7 @@ def add_file(
     file_size: int,
     labels: List[str],
     content_sha256: Optional[str] = None,
+    storage_path: Optional[str] = None,
 ) -> dict:
     """Insert a new file record. Returns the created row as dict with a 'labels' list.
 
@@ -643,14 +646,15 @@ def add_file(
         file_size: File size in bytes.
         labels: List of topic labels. At least one is required.
         content_sha256: Optional SHA-256 digest of the raw file bytes.
+        storage_path: Optional local path containing queued upload bytes.
     """
     merged = _normalize_labels(labels)
     conn = _get_conn()
     try:
         cur = conn.execute(
-            "INSERT INTO files (filename, file_type, file_size, content_sha256, status, created_at) "
-            "VALUES (?, ?, ?, ?, 'pending', ?)",
-            (filename, file_type, file_size, content_sha256, _now_iso()),
+            "INSERT INTO files (filename, file_type, file_size, content_sha256, storage_path, status, created_at) "
+            "VALUES (?, ?, ?, ?, ?, 'pending', ?)",
+            (filename, file_type, file_size, content_sha256, storage_path, _now_iso()),
         )
         file_id = cur.lastrowid
         _set_file_labels(conn, file_id, merged)
@@ -762,6 +766,46 @@ def update_file_progress(
             values,
         )
         conn.commit()
+    finally:
+        conn.close()
+
+
+def update_file_storage_path(file_id: int, storage_path: Optional[str]) -> None:
+    """Update or clear the queued upload storage path for a file."""
+    conn = _get_conn()
+    try:
+        conn.execute(
+            "UPDATE files SET storage_path = ? WHERE id = ?",
+            (storage_path, file_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def list_recoverable_files() -> List[dict]:
+    """Return queued/in-flight uploaded files that can be re-enqueued on startup."""
+    conn = _get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM files "
+            "WHERE status IN ('pending', 'processing') "
+            "AND storage_path IS NOT NULL "
+            "ORDER BY created_at, id"
+        ).fetchall()
+        return [_row_to_file(conn, r) for r in rows]
+    finally:
+        conn.close()
+
+
+def get_active_file_ingest_count() -> int:
+    """Count uploaded files waiting for or currently in file ingestion."""
+    conn = _get_conn()
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM files WHERE status IN ('pending', 'processing')"
+        ).fetchone()
+        return row["cnt"]
     finally:
         conn.close()
 

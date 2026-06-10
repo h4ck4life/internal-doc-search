@@ -74,6 +74,12 @@ async def app_lifespan(app: FastAPI):
     )
     _load_models()
     init_db()
+    recovered = shared.recover_queued_file_processing()
+    if recovered:
+        import logging
+        logging.getLogger(__name__).info(
+            "Recovered %d queued file upload(s)", recovered,
+        )
     from folder_watcher import start_supervisor
     start_supervisor()
     yield
@@ -103,28 +109,17 @@ from mcp_server import mcp as mcp_app
 # FastMCP 3.x: http_app(path='/') means the sub-app's route is at "/".
 
 
-def _process_file_in_thread(content: bytes, filename: str, labels: list[str], file_id: int):
-    """Process uploaded file in a background thread.
+def _enqueue_file_processing(
+    content: bytes,
+    filename: str,
+    labels: list[str],
+    file_id: int,
+    storage_path: Optional[str] = None,
+):
+    """Queue uploaded file processing on the shared FIFO worker."""
+    from shared import enqueue_file_processing
 
-    Delegates to shared._run_file_processing which handles the full
-    process_file → error handling → status update → untrack lifecycle.
-    """
-    from shared import _run_file_processing
-    _run_file_processing(content, filename, labels, file_id)
-
-
-def _spawn_file_thread(content: bytes, filename: str, labels: list[str], file_id: int):
-    """Spawn a tracked background thread for file processing."""
-    from shared import track_file_thread
-
-    t = threading.Thread(
-        target=_process_file_in_thread,
-        args=(content, filename, labels, file_id),
-        daemon=True,
-    )
-    track_file_thread(t)
-    t.start()
-    return t
+    return enqueue_file_processing(content, filename, labels, file_id, storage_path)
 
 
 # FastMCP 3.x: http_app(path='/') means the sub-app's route is at "/".
@@ -757,6 +752,13 @@ async def upload_file_endpoint(
             },
         )
 
+    try:
+        shared.validate_file_upload_capacity(len(content))
+    except shared.FileQueueLimitError as e:
+        raise HTTPException(status_code=429, detail=str(e))
+    except shared.UploadStorageLimitError as e:
+        raise HTTPException(status_code=507, detail=str(e))
+
     # Insert SQLite record (file_type from the earlier detection)
     try:
         record = add_file(filename, file_type, len(content), label_list, content_sha256)
@@ -770,8 +772,29 @@ async def upload_file_endpoint(
             },
         )
 
-    # Process in tracked background thread (joined at shutdown)
-    _spawn_file_thread(content, filename, label_list, record["id"])
+    try:
+        storage_path = shared.save_upload_content(
+            record["id"], filename, content, content_sha256,
+        )
+        from store import update_file_storage_path
+        update_file_storage_path(record["id"], storage_path)
+        record["storage_path"] = storage_path
+    except Exception as e:
+        from store import update_file_status
+        update_file_status(
+            record["id"],
+            "failed",
+            error_message=f"Failed to persist queued upload: {e}",
+            processing_stage="failed",
+            progress_message="Failed to persist queued upload",
+        )
+        raise HTTPException(status_code=500, detail=f"Failed to queue upload: {e}")
+
+    # Process on the shared FIFO worker. This serializes embedding model use and
+    # lets a second upload start automatically after the first completes.
+    _enqueue_file_processing(
+        content, filename, label_list, record["id"], storage_path=storage_path,
+    )
 
     return record
 

@@ -4,6 +4,7 @@ import io
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import shared
 
 
 # ─── POST /files ───────────────────────────────────────────────────
@@ -44,8 +45,9 @@ def test_upload_file_empty(client):
 
 def test_upload_file_success(client, temp_db):
     """POST /files with valid file returns 201 and record."""
-    # Mock the background thread so it doesn't try to process
-    with patch("api.threading.Thread") as MockThread, \
+    # Mock the queue so it doesn't try to process
+    with patch("api._enqueue_file_processing") as mock_enqueue, \
+         patch("shared.save_upload_content", return_value="data/uploads/1.txt"), \
          patch("file_processor.detect_file_type", return_value=("txt", MagicMock())):
         resp = client.post(
             "/files",
@@ -60,12 +62,13 @@ def test_upload_file_success(client, temp_db):
         assert data["status"] == "pending"
         assert len(data["content_sha256"]) == 64
         assert set(data["labels"]) == {"Auth", "API"}
-        MockThread.assert_called_once()
+        mock_enqueue.assert_called_once()
 
 
 def test_upload_epub_file_success(client, temp_db):
     """POST /files accepts EPUB uploads."""
-    with patch("api.threading.Thread") as MockThread:
+    with patch("api._enqueue_file_processing") as mock_enqueue, \
+         patch("shared.save_upload_content", return_value="data/uploads/1.epub"):
         resp = client.post(
             "/files",
             files={
@@ -82,12 +85,13 @@ def test_upload_epub_file_success(client, temp_db):
         assert data["filename"] == "guide.epub"
         assert data["file_type"] == "epub"
         assert data["status"] == "pending"
-        MockThread.assert_called_once()
+        mock_enqueue.assert_called_once()
 
 
 def test_upload_file_duplicate_content_returns_409(client, temp_db):
     """POST /files rejects duplicate raw file content by SHA-256."""
-    with patch("api.threading.Thread") as MockThread, \
+    with patch("api._enqueue_file_processing") as mock_enqueue, \
+         patch("shared.save_upload_content", return_value="data/uploads/1.txt"), \
          patch("file_processor.detect_file_type", return_value=("txt", MagicMock())):
         first = client.post(
             "/files",
@@ -106,22 +110,48 @@ def test_upload_file_duplicate_content_returns_409(client, temp_db):
         detail = second.json()["detail"]
         assert detail["status"] == "duplicate_file"
         assert detail["file"]["filename"] == "first.txt"
-        assert MockThread.call_count == 1
+        assert mock_enqueue.call_count == 1
 
 
-def test_upload_file_spawns_background_thread(client, temp_db):
-    """Verify upload spawns a daemon thread for processing."""
-    with patch("api.threading.Thread") as MockThread, \
+def test_upload_file_enqueues_background_processing(client, temp_db):
+    """Verify upload queues background processing."""
+    with patch("api._enqueue_file_processing") as mock_enqueue, \
+         patch("shared.save_upload_content", return_value="data/uploads/1.txt"), \
          patch("file_processor.detect_file_type", return_value=("txt", MagicMock())):
-        mock_thread = MagicMock()
-        MockThread.return_value = mock_thread
-
         client.post(
             "/files",
             files={"file": ("doc.txt", io.BytesIO(b"text"), "text/plain")},
             data={"labels": "Docs"},
         )
-        mock_thread.start.assert_called_once()
+        mock_enqueue.assert_called_once()
+
+
+def test_upload_file_queue_full_returns_429(client, temp_db):
+    """POST /files rejects uploads when the ingestion queue is full."""
+    with patch("shared.validate_file_upload_capacity", side_effect=shared.FileQueueLimitError("queue full")), \
+         patch("file_processor.detect_file_type", return_value=("txt", MagicMock())):
+        resp = client.post(
+            "/files",
+            files={"file": ("doc.txt", io.BytesIO(b"text"), "text/plain")},
+            data={"labels": "Docs"},
+        )
+
+    assert resp.status_code == 429
+    assert "queue full" in resp.json()["detail"]
+
+
+def test_upload_file_storage_full_returns_507(client, temp_db):
+    """POST /files rejects uploads when the queued upload spool is full."""
+    with patch("shared.validate_file_upload_capacity", side_effect=shared.UploadStorageLimitError("storage full")), \
+         patch("file_processor.detect_file_type", return_value=("txt", MagicMock())):
+        resp = client.post(
+            "/files",
+            files={"file": ("doc.txt", io.BytesIO(b"text"), "text/plain")},
+            data={"labels": "Docs"},
+        )
+
+    assert resp.status_code == 507
+    assert "storage full" in resp.json()["detail"]
 
 
 # ─── GET /files ────────────────────────────────────────────────────

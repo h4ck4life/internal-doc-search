@@ -90,7 +90,7 @@ def _query_variants(query: str) -> list[str]:
         q,
         flags=re.IGNORECASE,
     )
-    simplified = " ".join(simplified.split(" ?,:;.-"))
+    simplified = re.sub(r"[?,:;.\-]", " ", simplified)
     simplified = " ".join(simplified.split())
     if simplified and simplified.lower() != q.lower():
         variants.append(simplified)
@@ -118,6 +118,65 @@ def _query_variants(query: str) -> list[str]:
         if v and v not in out:
             out.append(v)
     return out[:4]
+
+
+def _next_action_line(
+    result_count: int,
+    max_ce: float,
+    has_labels: bool,
+) -> str:
+    """One-line imperative directive. Agents follow a short instruction more
+    reliably than a nested next_steps plan, so this mirrors the key move."""
+    if not has_labels:
+        return (
+            "The index has no labels or chunks yet. Use add_url_to_crawl then "
+            "trigger_crawl before searching again."
+        )
+    if result_count == 0:
+        return (
+            "No matches. Call list_labels, then re-run search_docs scoped to the "
+            "closest label and try the suggested query_variants before reporting "
+            "nothing was found."
+        )
+    if max_ce < 0.45:
+        return (
+            f"Weak relevance (max {max_ce:.2f}). Before answering, try label scoping, "
+            "boost mode, or a query variant; if a result looks plausible, call "
+            "get_adjacent_chunks on it first."
+        )
+    return (
+        f"Reasonable match (max {max_ce:.2f}). Confirm the answer is complete with "
+        "get_adjacent_chunks before concluding."
+    )
+
+
+def _adjacency_nudge(results: list[dict]) -> dict:
+    """Light guidance for strong result sets: confirm the answer is not split
+    across a chunk boundary. Avoids the full-corpus label scroll that the
+    weak-result path performs, and targets the real top result (no placeholder)."""
+    if not results:
+        return {}
+    top = results[0]
+    max_ce = max((r.get("cross_encoder_score", 0) for r in results), default=0)
+    return {
+        "_next_action": (
+            f"Strong match (max {max_ce:.2f}). Before answering, call get_adjacent_chunks "
+            "on the top result to confirm the answer is not cut off at a chunk boundary."
+        ),
+        "next_steps": [
+            {
+                "tool": "get_adjacent_chunks",
+                "arguments": {
+                    "url": top.get("url", ""),
+                    "chunk_index": top.get("chunk_index", 0),
+                    "page_index": top.get("page_index", 0),
+                    "window": 2,
+                },
+                "why": "Definitions, parameters, and caveats often sit in neighboring chunks.",
+            }
+        ],
+        "stop_condition": "Answer once adjacent chunks confirm the result is complete.",
+    }
 
 
 async def _available_label_names(client) -> list[str]:
@@ -242,6 +301,28 @@ def _search_guidance(
             "Low cross-encoder score. Treat current results as leads, not proof of absence. "
             "Try label scoping, boost mode, and query variants first."
         )
+
+    # Gap-fill exit: when labels exist but nothing scores well, the topic may
+    # simply be unindexed. Offer crawling as an explicit escape hatch so the
+    # agent is not pushed to loop on search forever.
+    if (result_count == 0 or max_ce < 0.3) and available_labels:
+        guidance["next_steps"].append({
+            "tool": "add_url_to_crawl",
+            "when": "Label scoping, boost mode, and query variants have all failed to surface a strong hit.",
+            "why": "The topic may not be indexed yet; crawling a likely source fills the gap instead of reporting a false 'not found'.",
+        })
+
+    guidance["stop_condition"] = (
+        "Stop exploring and answer once a result has cross_encoder_score >= 0.45 and you "
+        "have read its adjacent chunks. If label scoping, boost mode, and 2+ query variants "
+        "all fail, report the topic as likely unindexed (and suggest add_url_to_crawl) rather "
+        "than searching further."
+    )
+    guidance["_next_action"] = _next_action_line(
+        result_count=result_count,
+        max_ce=max_ce,
+        has_labels=bool(available_labels),
+    )
 
     return guidance
 
@@ -437,6 +518,16 @@ async def search_docs(
                 result_count=len(normalized),
                 max_ce=max_ce,
             )
+        else:
+            # Strong, full result set: nudge the agent to confirm completeness via
+            # adjacent chunks without paying for a full-corpus label scroll.
+            response["_guidance"] = _adjacency_nudge(normalized)
+
+        # Surface the imperative directive at the top level — agents follow a short
+        # one-liner more reliably than a nested next_steps plan.
+        _g = response.get("_guidance")
+        if isinstance(_g, dict) and _g.get("_next_action"):
+            response["_next_action"] = _g["_next_action"]
 
         if max_ce < 0.3:
             available = available_labels or await _available_label_names(client)
@@ -879,6 +970,13 @@ async def upload_file(
             "file": duplicate,
         }
 
+    try:
+        shared.validate_file_upload_capacity(file_size)
+    except shared.FileQueueLimitError as e:
+        return {"error": str(e), "status": "queue_full"}
+    except shared.UploadStorageLimitError as e:
+        return {"error": str(e), "status": "storage_full"}
+
     # Insert record with status='pending' — processing runs in background
     try:
         record = _store_add_file(filename, file_type, file_size, labels, content_sha256)
@@ -889,17 +987,32 @@ async def upload_file(
             "file": e.existing_file,
         }
 
-    # Process in background thread to avoid blocking the async event loop.
-    # Uses shared._run_file_processing (same as REST API POST /files).
-    from shared import _run_file_processing, track_file_thread
+    try:
+        storage_path = shared.save_upload_content(
+            record["id"], filename, content, content_sha256,
+        )
+        from store import update_file_storage_path
 
-    t = threading.Thread(
-        target=_run_file_processing,
-        args=(content, filename, labels, record["id"]),
-        daemon=True,
+        update_file_storage_path(record["id"], storage_path)
+        record["storage_path"] = storage_path
+    except Exception as e:
+        from store import update_file_status
+
+        update_file_status(
+            record["id"],
+            "failed",
+            error_message=f"Failed to persist queued upload: {e}",
+            processing_stage="failed",
+            progress_message="Failed to persist queued upload",
+        )
+        return {"error": f"Failed to queue upload: {e}"}
+
+    # Process on the shared FIFO worker to serialize embedding model use.
+    from shared import enqueue_file_processing
+
+    enqueue_file_processing(
+        content, filename, labels, record["id"], storage_path=storage_path,
     )
-    track_file_thread(t)
-    t.start()
 
     return record
 
