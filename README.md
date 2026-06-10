@@ -78,7 +78,7 @@ curl -X POST http://localhost:8000/folders \
 curl http://localhost:8000/folders
 ```
 
-Supported file types: PDF, DOCX, TXT, MD, HTML/HTM, CSV, and JSON. Files are limited to 50 MB. Folder paths are resolved on the machine/container running the API server. By default, local non-container runs allow watches under the API process user's home directory. Docker Compose mounts the host home directory at `/watched/home`, so Docker users should select paths under `/watched/home`.
+Supported file types: PDF, DOCX, EPUB, TXT, MD, HTML/HTM, CSV, and JSON. Files are limited to 50 MB. Folder paths are resolved on the machine/container running the API server. By default, local non-container runs allow watches under the API process user's home directory. Docker Compose mounts the host home directory at `/watched/home`, so Docker users should select paths under `/watched/home`.
 
 ### 4. Run ingestion
 
@@ -143,7 +143,7 @@ The server exposes an **MCP (Model Context Protocol)** endpoint at `/mcp/`. LLM 
 | `add_url_to_crawl(url, labels, deep_crawl, depth, patterns)` | Add documentation URL with multi-label and deep crawl config. Auto-registers discovered pages during deep crawl |
 | `trigger_crawl(mode)` | Start background crawl in a dedicated thread (non-blocking): `"all"` recrawls everything, `"new"` only pending/failed |
 | `recrawl_url(url_id)` | Re-crawl a single URL by its database ID |
-| `upload_file(file_path, labels)` | Upload a local document path (PDF, DOCX, TXT, MD, HTML, CSV, JSON) for chunking and indexing |
+| `upload_file(file_path, labels)` | Upload a local document path (PDF, DOCX, EPUB, TXT, MD, HTML, CSV, JSON) for chunking and indexing |
 | `delete_file(file_id)` | Delete an uploaded file and remove its vectors from Qdrant |
 | `list_files(limit, offset)` | List all uploaded files with labels and chunk counts |
 | `watch_folder(folder_path, labels)` | Watch a local folder recursively and automatically ingest supported files |

@@ -1,6 +1,6 @@
 """File processing pipeline: extract text from uploaded files -> chunk -> embed -> store in Qdrant.
 
-Handles PDF, DOCX, TXT, MD, HTML, CSV, and JSON files. Reuses the existing
+Handles PDF, DOCX, EPUB, TXT, MD, HTML, CSV, and JSON files. Reuses the existing
 chunker (chunker.py) and embedding model (shared.bi_encoder). Stores vectors
 in the same Qdrant collection as URL chunks, distinguished by source_type="file".
 """
@@ -10,7 +10,7 @@ import json
 import logging
 import os
 import uuid
-from io import StringIO
+from io import BytesIO, StringIO
 from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
@@ -34,8 +34,6 @@ def _extract_pdf(content: bytes) -> str:
 
 def _extract_docx(content: bytes) -> str:
     """Extract text from DOCX using python-docx, paragraph by paragraph."""
-    from io import BytesIO
-
     from docx import Document
 
     doc = Document(BytesIO(content))
@@ -55,6 +53,24 @@ def _extract_html(content: bytes) -> str:
     for element in soup(["script", "style", "nav", "footer", "header"]):
         element.decompose()
     return soup.get_text(separator="\n", strip=True)
+
+
+def _extract_epub(content: bytes) -> str:
+    """Extract text from EPUB document items using EbookLib + BeautifulSoup."""
+    import ebooklib
+    from ebooklib import epub
+
+    book = epub.read_epub(BytesIO(content))
+    sections = []
+    for item in book.get_items_of_type(ebooklib.ITEM_DOCUMENT):
+        if hasattr(item, "get_body_content"):
+            item_content = item.get_body_content()
+        else:
+            item_content = item.get_content()
+        text = _extract_html(item_content)
+        if text:
+            sections.append(text)
+    return "\n\n".join(sections)
 
 
 def _extract_txt(content: bytes) -> str:
@@ -88,6 +104,7 @@ def _extract_json(content: bytes) -> str:
 EXTENSION_MAP: dict[str, tuple[str, Callable[[bytes], str]]] = {
     ".pdf":  ("pdf",  _extract_pdf),
     ".docx": ("docx", _extract_docx),
+    ".epub": ("epub", _extract_epub),
     ".txt":  ("txt",  _extract_txt),
     ".md":   ("md",   _extract_md),
     ".html": ("html", _extract_html),

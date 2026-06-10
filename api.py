@@ -701,7 +701,7 @@ async def upload_file_endpoint(
     file: UploadFile = File(...),
     labels: str = Form(default=""),
 ):
-    """Upload a document file for indexing. Accepts: PDF, DOCX, TXT, MD, HTML, CSV, JSON.
+    """Upload a document file for indexing. Accepts: PDF, DOCX, EPUB, TXT, MD, HTML, CSV, JSON.
 
     Labels are comma-separated (e.g. "Auth, API"). At least one label is required.
     Duplicate file content is rejected by SHA-256 digest with HTTP 409.

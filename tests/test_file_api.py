@@ -63,6 +63,28 @@ def test_upload_file_success(client, temp_db):
         MockThread.assert_called_once()
 
 
+def test_upload_epub_file_success(client, temp_db):
+    """POST /files accepts EPUB uploads."""
+    with patch("api.threading.Thread") as MockThread:
+        resp = client.post(
+            "/files",
+            files={
+                "file": (
+                    "guide.epub",
+                    io.BytesIO(b"epub bytes"),
+                    "application/epub+zip",
+                )
+            },
+            data={"labels": "Docs"},
+        )
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data["filename"] == "guide.epub"
+        assert data["file_type"] == "epub"
+        assert data["status"] == "pending"
+        MockThread.assert_called_once()
+
+
 def test_upload_file_duplicate_content_returns_409(client, temp_db):
     """POST /files rejects duplicate raw file content by SHA-256."""
     with patch("api.threading.Thread") as MockThread, \
