@@ -76,6 +76,9 @@
   .status-dot { width:7px; height:7px; border-radius:50%; background:var(--green); flex-shrink:0; transition:background 0.3s; }
   .status-dot.offline { background:var(--red); }
   .status-dot.checking { background:var(--amber); }
+  .ingest-indicator{display:inline-flex;align-items:center;gap:0.35rem;height:28px;padding:0 0.58rem;border-radius:9999px;border:1px solid rgba(88,166,255,0.32);background:rgba(88,166,255,0.08);color:#79b8ff;font-size:0.72rem;font-weight:600;white-space:nowrap;}
+  .ingest-indicator .spinner{width:0.68rem;height:0.68rem;border-width:2px;border-color:rgba(121,184,255,0.24);border-top-color:#79b8ff;}
+  .ingest-indicator.idle{display:none;}
 
   /* ── Cards / layout ── */
   .card{background:var(--surface);border:1px solid var(--border);border-radius:12px;}
@@ -390,6 +393,7 @@
     <div class="toolbar">
       <!-- Status indicator -->
       <div id="statusDot" class="status-dot checking" title="Checking server…"></div>
+      <div id="ingestIndicator" class="ingest-indicator idle" title="No ingestion running"><span class="spinner"></span><span id="ingestIndicatorText">Ingesting</span></div>
       <div class="toolbar-sep"></div>
       <!-- Crawl actions -->
       <button id="crawlBtnNew" onclick="triggerCrawl('new')" class="btn btn-primary btn-sm">+ Crawl pending</button>
@@ -427,8 +431,9 @@
     <section class="card card-pad mb-5">
       <div class="flex gap-2 items-stretch">
         <input type="search" id="searchQuery" placeholder='e.g. "How does OAuth token refresh work?"'
-               onkeydown="if(event.key==='Enter')doSearch()" class="field flex-1">
+               oninput="_syncClearSearchButton()" onkeydown="if(event.key==='Enter')doSearch()" class="field flex-1">
         <button id="searchBtn" onclick="doSearch()" class="btn btn-primary flex-shrink-0" style="min-width:82px">Search</button>
+        <button id="clearSearchBtn" onclick="clearSearchResults()" class="btn btn-ghost flex-shrink-0" disabled>Clear</button>
       </div>
       <div id="chipWrap" class="relative mt-3" style="position:relative">
         <div class="chip-field" id="labelChips" onclick="document.getElementById('chipInput').focus()">
@@ -750,7 +755,7 @@
 let searchLimit=7,pollTimer=null,knownLabels=[];
 addEventListener('DOMContentLoaded',()=>{
   loadSummary();loadUrls();loadConfig();loadLabels();initChipInput();initCopyButtons();loadFiles();switchTab('search');
-  checkHealth();resumeCrawlProgress();
+  checkHealth();resumeCrawlProgress();syncGlobalIngestIndicator();setInterval(syncGlobalIngestIndicator,2500);
   // '/' shortcut focuses search when no input is focused
   document.addEventListener('keydown',e=>{
     if(e.key==='/'&&document.activeElement.tagName!=='INPUT'&&document.activeElement.tagName!=='TEXTAREA'&&document.activeElement.tagName!=='SELECT'){
@@ -774,6 +779,33 @@ async function checkHealth(){
 
 async function loadLabels(){
   try{knownLabels=(await (await fetch('/labels')).json()).map(l=>l.label);}catch(e){}
+}
+
+async function syncGlobalIngestIndicator(){
+  const el=document.getElementById('ingestIndicator'),txt=document.getElementById('ingestIndicatorText');
+  if(!el||!txt) return;
+  try{
+    const resp=await fetch('/ingest/status');
+    const crawl=resp.ok?await resp.json():{};
+    const activeFiles=Number(crawl.file_activity?.total||0);
+    const activeCrawl=!!crawl.running;
+    const total=(activeCrawl?1:0)+activeFiles;
+    if(total>0){
+      const parts=[];
+      if(activeCrawl) parts.push('crawl');
+      if(activeFiles) parts.push(`${activeFiles} file${activeFiles===1?'':'s'}`);
+      txt.textContent=`Ingesting: ${parts.join(', ')}`;
+      el.title='Ingestion in progress';
+      el.classList.remove('idle');
+    }else{
+      txt.textContent='Ingesting';
+      el.title='No ingestion running';
+      el.classList.add('idle');
+    }
+  }catch(e){
+    el.title='Ingestion status unavailable';
+    el.classList.add('idle');
+  }
 }
 
 // ── Crawl ─────────────────────────────────────────────────────────
@@ -853,6 +885,7 @@ function startPolling(){
       if(pctEl) pctEl.textContent=pct+'%';
       if(statDone) statDone.textContent=s.current_url||0;
       if(statChunks) statChunks.textContent=s.chunks_stored||0;
+      syncGlobalIngestIndicator();
       if(!s.running){
         clearInterval(pollTimer);pollTimer=null;resetCrawlBtns();
         const el=document.getElementById('crawlMsg');
@@ -889,7 +922,7 @@ function sortFiles(key){_filesSortKey===key?_filesSortAsc=!_filesSortAsc:(_files
 function _fmtSize(bytes){if(!bytes) return '0 B';const u=['B','KB','MB','GB'];let i=0,v=bytes;while(v>=1024&&i<u.length-1){v/=1024;i++;}return v.toFixed(i===0?0:1)+'\u00a0'+u[i];}
 function _fmtFileType(type){return `<span class="badge-file badge-${type||'txt'}">${type||'?'}</span>`;}
 function _fmtFileDate(iso){try{return new Date(iso).toLocaleString();}catch{return iso||'';}}
-function _isFileActive(f){return f.status==='pending'||f.status==='processing';}
+function _isFileActive(f){return f.status==='pending'||f.status==='processing'||f.status==='deleting';}
 function _syncFilePolling(){
   const active=_filesData.some(_isFileActive);
   if(active&&!_filePollTimer){
@@ -903,6 +936,7 @@ async function loadFiles(opts={}){
     _filesData=await (await fetch('/files')).json();
     _renderFileTable();
     _syncFilePolling();
+    syncGlobalIngestIndicator();
   }catch(e){}
 }
 function _fmtFileStatus(f){
@@ -1455,6 +1489,20 @@ function resetConfig(){
 let _searchItems=[],_searchHint=null,_searchPage=1,_searchExpandAll=false;
 const SEARCH_PAGE_SIZE=5;
 
+function _syncClearSearchButton(){
+  const btn=document.getElementById('clearSearchBtn'),q=document.getElementById('searchQuery');
+  if(btn) btn.disabled=!(q?.value.trim()||_searchItems.length||_searchHint||document.getElementById('searchResults')?.innerHTML.trim());
+}
+
+function clearSearchResults(){
+  const q=document.getElementById('searchQuery'),results=document.getElementById('searchResults');
+  if(q) q.value='';
+  _searchItems=[];_searchHint=null;_searchPage=1;_searchExpandAll=false;
+  if(results) results.innerHTML='';
+  _syncClearSearchButton();
+  q?.focus();
+}
+
 // Normalise raw chunk text: collapse 3+ newlines → 2, strip leading whitespace per line,
 // trim the whole block. This cleans up HTML-stripped content with ragged indentation.
 function _normaliseChunk(raw){
@@ -1481,7 +1529,7 @@ async function doSearch(){
     _searchItems=items;_searchHint=(!Array.isArray(data)&&data._hint)?data._hint:null;
     _searchPage=1;_searchExpandAll=false;_renderSearch();
   }catch(e){results.innerHTML=`<p style="color:var(--red);font-size:0.85rem">Error: ${esc(e.message)}</p>`;}
-  finally{btn.disabled=false;btn.innerHTML='Search';}
+  finally{btn.disabled=false;btn.innerHTML='Search';_syncClearSearchButton();}
 }
 
 function _renderSearch(){
@@ -1489,7 +1537,7 @@ function _renderSearch(){
   if(!items.length){
     let html='<div class="empty-state"><span class="icon">🔍</span>No results found.</div>';
     if(_searchHint) html+=`<div class="hint-box">💡 ${esc(_searchHint)}</div>`;
-    results.innerHTML=html;return;
+    results.innerHTML=html;_syncClearSearchButton();return;
   }
   const totalPages=Math.max(1,Math.ceil(items.length/SEARCH_PAGE_SIZE));
   _searchPage=Math.min(Math.max(1,_searchPage),totalPages);
@@ -1536,6 +1584,7 @@ function _renderSearch(){
   }).join('');
   html+=`</div>${_renderPager(totalPages)}`;
   results.innerHTML=html;
+  _syncClearSearchButton();
   requestAnimationFrame(()=>{
     document.querySelectorAll('#searchResults .result-content').forEach(el=>{
       const btn=document.querySelector(`#searchResults .result-toggle[data-target="${el.id}"]`);if(!btn) return;

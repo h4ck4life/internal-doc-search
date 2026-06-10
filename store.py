@@ -917,6 +917,24 @@ def get_active_file_ingest_count() -> int:
         conn.close()
 
 
+def get_file_activity_counts() -> dict[str, int]:
+    """Count file rows that represent active background work."""
+    conn = _get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT status, COUNT(*) AS cnt FROM files "
+            "WHERE status IN ('pending', 'processing', 'deleting') "
+            "GROUP BY status"
+        ).fetchall()
+        counts = {"pending": 0, "processing": 0, "deleting": 0}
+        for row in rows:
+            counts[row["status"]] = row["cnt"]
+        counts["total"] = sum(counts.values())
+        return counts
+    finally:
+        conn.close()
+
+
 def list_files(limit: int = 50, offset: int = 0) -> List[dict]:
     """List uploaded files with labels, most recent first."""
     conn = _get_conn()

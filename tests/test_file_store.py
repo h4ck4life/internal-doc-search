@@ -209,6 +209,34 @@ def test_get_active_file_ingest_count(temp_db):
     assert temp_db.get_active_file_ingest_count() == 2
 
 
+def test_get_file_activity_counts(temp_db):
+    """Activity counts include queued, in-flight, and deleting file work."""
+    temp_db.add_file("pending.pdf", "pdf", 10, ["Docs"])
+    processing = temp_db.add_file("processing.pdf", "pdf", 10, ["Docs"])
+    deleting = temp_db.add_file("deleting.pdf", "pdf", 10, ["Docs"])
+    completed = temp_db.add_file("done.pdf", "pdf", 10, ["Docs"])
+    temp_db.update_file_progress(
+        processing["id"],
+        processing_stage="embedding",
+        progress_current=1,
+        progress_total=2,
+    )
+    temp_db.update_file_progress(
+        deleting["id"],
+        status="deleting",
+        processing_stage="deleting",
+        progress_message="Deleting vectors",
+    )
+    temp_db.update_file_status(completed["id"], "completed", chunk_count=1)
+
+    assert temp_db.get_file_activity_counts() == {
+        "pending": 1,
+        "processing": 1,
+        "deleting": 1,
+        "total": 3,
+    }
+
+
 def test_list_files_pagination(temp_db):
     """list_files respects limit and offset."""
     for i in range(5):

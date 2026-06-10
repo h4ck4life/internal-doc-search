@@ -50,6 +50,7 @@ from store import (
     get_file,
     get_file_count,
     get_file_chunk_count,
+    get_file_activity_counts,
     get_file_by_digest,
     add_folder_watch,
     list_folder_watches,
@@ -443,7 +444,9 @@ async def ingest(mode: str = Query(default="all", pattern="^(all|new)$")):
 @app.get("/ingest/status")
 async def ingest_status():
     """Return current crawler state."""
-    return get_ingest_state()
+    state = get_ingest_state()
+    state["file_activity"] = get_file_activity_counts()
+    return state
 
 
 @app.get("/docs-summary")
