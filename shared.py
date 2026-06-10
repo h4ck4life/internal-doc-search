@@ -102,8 +102,16 @@ def _run_file_processing(content: bytes, filename: str, labels: list[str], file_
             "Unhandled error processing file %s: %s",
             filename, traceback.format_exc(),
         )
-        update_file_status(file_id, "failed",
-                           error_message=traceback.format_exc())
+        error = traceback.format_exc()
+        update_file_status(
+            file_id,
+            "failed",
+            error_message=error,
+            processing_stage="failed",
+            progress_current=0,
+            progress_total=0,
+            progress_message="Processing failed",
+        )
     finally:
         untrack_file_thread(threading.current_thread())
 

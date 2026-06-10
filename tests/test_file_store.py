@@ -18,6 +18,10 @@ def test_init_db_creates_files_table(temp_db):
         assert "file_labels" in table_names
         file_cols = conn.execute("PRAGMA table_info(files)").fetchall()
         assert "content_sha256" in [c["name"] for c in file_cols]
+        assert "processing_stage" in [c["name"] for c in file_cols]
+        assert "progress_current" in [c["name"] for c in file_cols]
+        assert "progress_total" in [c["name"] for c in file_cols]
+        assert "progress_message" in [c["name"] for c in file_cols]
     finally:
         conn.close()
 
@@ -79,6 +83,10 @@ def test_new_file_defaults(temp_db):
     record = temp_db.add_file("test.md", "md", 256, ["Docs"])
     assert record["status"] == "pending"
     assert record["chunk_count"] == 0
+    assert record["processing_stage"] == "queued"
+    assert record["progress_current"] == 0
+    assert record["progress_total"] == 0
+    assert record["progress_message"] == ""
     assert record["error_message"] is None
     assert record["created_at"] is not None
 
@@ -135,11 +143,34 @@ def test_update_file_status(temp_db):
     """update_file_status sets chunk_count and status."""
     record = temp_db.add_file("data.csv", "csv", 800, ["Data"])
     temp_db.update_file_status(record["id"], "failed", chunk_count=0,
-                                error_message="test error")
+                                error_message="test error",
+                                processing_stage="failed",
+                                progress_message="Processing failed")
 
     updated = temp_db.get_file(record["id"])
     assert updated["status"] == "failed"
     assert updated["error_message"] == "test error"
+    assert updated["processing_stage"] == "failed"
+    assert updated["progress_message"] == "Processing failed"
+
+
+def test_update_file_progress(temp_db):
+    """update_file_progress records in-flight ingestion progress."""
+    record = temp_db.add_file("data.csv", "csv", 800, ["Data"])
+    temp_db.update_file_progress(
+        record["id"],
+        processing_stage="embedding",
+        progress_current=8,
+        progress_total=20,
+        progress_message="Embedding 8/20 chunks",
+    )
+
+    updated = temp_db.get_file(record["id"])
+    assert updated["status"] == "processing"
+    assert updated["processing_stage"] == "embedding"
+    assert updated["progress_current"] == 8
+    assert updated["progress_total"] == 20
+    assert updated["progress_message"] == "Embedding 8/20 chunks"
 
 
 def test_list_files_pagination(temp_db):

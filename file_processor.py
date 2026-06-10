@@ -135,41 +135,95 @@ def process_file(
     import shared
     from chunker import chunk_text_with_metadata
     from qdrant_client import QdrantClient, models as qmodels
-    from store import get_config, update_file_status
+    from store import update_file_progress, update_file_status
+
+    def progress(
+        stage: str,
+        current: int = 0,
+        total: int = 0,
+        message: str = "",
+        *,
+        chunk_count: Optional[int] = None,
+    ) -> None:
+        update_file_progress(
+            file_id,
+            processing_stage=stage,
+            progress_current=current,
+            progress_total=total,
+            progress_message=message,
+            chunk_count=chunk_count,
+        )
+        if on_progress:
+            on_progress(file_id, stage, current)
 
     detected = detect_file_type(filename)
     if detected is None:
-        update_file_status(file_id, "failed",
-                           error_message=f"Unsupported file type: {filename}")
+        update_file_status(
+            file_id,
+            "failed",
+            error_message=f"Unsupported file type: {filename}",
+            processing_stage="failed",
+            progress_current=0,
+            progress_total=0,
+            progress_message=f"Unsupported file type: {filename}",
+        )
         return {"status": "failed", "error": f"Unsupported file type: {filename}"}
 
     file_type, extractor = detected
 
     # Step 1: Extract text
+    progress("extracting", 0, 1, f"Extracting text from {file_type.upper()}")
     try:
         text = extractor(content)
     except Exception as e:
         logger.error("Extraction error for %s: %s", filename, e)
-        update_file_status(file_id, "failed", error_message=f"Extraction error: {e}")
+        update_file_status(
+            file_id,
+            "failed",
+            error_message=f"Extraction error: {e}",
+            processing_stage="failed",
+            progress_current=0,
+            progress_total=0,
+            progress_message=f"Extraction failed: {e}",
+        )
         return {"status": "failed", "error": f"Extraction error: {e}"}
+    progress("extracting", 1, 1, "Text extracted")
 
     if not text or not text.strip():
-        update_file_status(file_id, "completed", chunk_count=0)
+        update_file_status(
+            file_id,
+            "completed",
+            chunk_count=0,
+            processing_stage="completed",
+            progress_current=1,
+            progress_total=1,
+            progress_message="No text content found",
+        )
         return {"status": "completed", "chunks_stored": 0, "message": "Empty content"}
 
     # Step 2: Chunk (reuse existing token-aware chunker + shared config resolver)
     from store import resolve_chunk_config
     max_tokens, overlap_tokens = resolve_chunk_config()
 
+    progress("chunking", 0, 1, "Splitting text into searchable chunks")
     chunks_with_meta = chunk_text_with_metadata(
         text, max_tokens=max_tokens, overlap_tokens=overlap_tokens,
     )
 
     if not chunks_with_meta:
-        update_file_status(file_id, "completed", chunk_count=0)
+        update_file_status(
+            file_id,
+            "completed",
+            chunk_count=0,
+            processing_stage="completed",
+            progress_current=1,
+            progress_total=1,
+            progress_message="No chunks generated",
+        )
         return {"status": "completed", "chunks_stored": 0}
 
     total_chunks = len(chunks_with_meta)
+    progress("chunking", total_chunks, total_chunks, f"Created {total_chunks} chunks")
 
     # Step 3: Embed and build Qdrant points
     if not labels:
@@ -178,11 +232,26 @@ def process_file(
     from store import _normalize_labels as _norm
     labels = _norm(labels)
 
-    # Batch-embed all chunks in a single encoder forward pass
+    # Embed in explicit batches so progress can be persisted while the model works.
     chunk_texts = [cm["text"] for cm in chunks_with_meta]
-    embeddings = shared.bi_encoder.encode(chunk_texts).tolist()
+    batch_size = int(os.environ.get("FILE_EMBED_BATCH_SIZE", "32"))
+    batch_size = max(1, batch_size)
+    embeddings = []
+    progress("embedding", 0, total_chunks, f"Embedding 0/{total_chunks} chunks")
+    for start in range(0, total_chunks, batch_size):
+        batch = chunk_texts[start:start + batch_size]
+        batch_embeddings = shared.bi_encoder.encode(
+            batch,
+            batch_size=batch_size,
+            show_progress_bar=False,
+        ).tolist()
+        embeddings.extend(batch_embeddings)
+        done = min(start + len(batch), total_chunks)
+        progress("embedding", done, total_chunks, f"Embedding {done}/{total_chunks} chunks")
 
     all_points = []
+    total_points = total_chunks * len(labels)
+    progress("storing", 0, total_points, f"Preparing {total_points} vectors for Qdrant")
     for chunk_idx, cm in enumerate(chunks_with_meta):
         embedding = embeddings[chunk_idx]
         for lbl in labels:
@@ -211,10 +280,12 @@ def process_file(
     # Step 4: Ensure Qdrant collection exists, then upsert
     client = None
     try:
+        progress("storing", 0, total_points, "Connecting to Qdrant")
         client = QdrantClient(url=shared.QDRANT_URL, check_compatibility=False)
         collections = client.get_collections()
         exists = any(c.name == shared.COLLECTION_NAME for c in collections.collections)
         if not exists:
+            progress("storing", 0, total_points, "Creating Qdrant collection")
             client.create_collection(
                 collection_name=shared.COLLECTION_NAME,
                 vectors_config=qmodels.VectorParams(
@@ -223,16 +294,26 @@ def process_file(
             )
 
         if all_points:
+            progress("storing", 0, total_points, f"Writing {total_points} vectors to Qdrant")
             client.upsert(
                 collection_name=shared.COLLECTION_NAME,
                 points=all_points,
             )
+            progress("storing", total_points, total_points, f"Stored {total_points} vectors")
     finally:
         if client is not None:
             client.close()
 
     total_points = len(all_points)
-    update_file_status(file_id, "completed", chunk_count=total_points)
+    update_file_status(
+        file_id,
+        "completed",
+        chunk_count=total_points,
+        processing_stage="completed",
+        progress_current=total_points,
+        progress_total=total_points,
+        progress_message=f"Indexed {total_chunks} chunks as {total_points} vectors",
+    )
 
     if on_progress:
         on_progress(file_id, "completed", total_points)

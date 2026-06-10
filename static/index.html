@@ -138,6 +138,7 @@
   .badge-completed{background:rgba(63,185,80,0.14);color:#56d364;}
   .badge-pending{background:rgba(210,153,34,0.14);color:#e3b341;}
   .badge-failed{background:rgba(248,81,73,0.14);color:#ff7b72;}
+  .badge-processing{background:rgba(88,166,255,0.14);color:#79b8ff;}
   .badge-crawling{background:rgba(88,166,255,0.14);color:#79b8ff;}
   .badge-running{background:rgba(88,166,255,0.14);color:#79b8ff;}
   .badge-starting,.badge-restarting{background:rgba(210,153,34,0.14);color:#e3b341;}
@@ -163,6 +164,8 @@
   .url-table tbody tr.row-selected:hover>td{background:rgba(88,166,255,0.12)!important;}
   .url-table tbody tr.row-crawling>td{background:rgba(210,153,34,0.06)!important;}
   .url-table tbody tr.row-crawling>td.col-cb{box-shadow:inset 3px 0 0 var(--amber);}
+  .url-table tbody tr.row-processing>td{background:rgba(88,166,255,0.05)!important;}
+  .url-table tbody tr.row-processing>td.col-cb{box-shadow:inset 3px 0 0 var(--accent);}
   .sort-ind{font-size:0.6rem;margin-left:0.25rem;opacity:0.45;}
   .sorted .sort-ind{opacity:1;color:var(--accent);}
 
@@ -192,6 +195,10 @@
   .progress-bar{height:6px;background:var(--border);border-radius:3px;overflow:hidden;}
   .progress-fill{height:100%;background:linear-gradient(90deg,#238636,#58a6ff);border-radius:3px;transition:width 0.5s ease;}
   .progress-label{display:flex;justify-content:space-between;margin-top:0.35rem;font-size:0.72rem;color:var(--muted);}
+  .file-progress{min-width:150px;}
+  .file-progress .progress-bar{height:5px;margin-top:0.25rem;}
+  .file-progress-top{display:flex;justify-content:space-between;gap:0.6rem;font-size:0.7rem;color:var(--muted);white-space:nowrap;}
+  .file-progress-msg{font-size:0.7rem;color:var(--muted);margin-top:0.22rem;max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 
   /* ── Bulk bar ── */
   .bulk-bar{display:none;align-items:center;gap:0.5rem;flex-wrap:wrap;padding:0.5rem 0.8rem;background:var(--surface-2);border:1px solid var(--border);border-radius:8px;margin-top:0.75rem;}
@@ -531,7 +538,7 @@
       <table class="url-table">
         <colgroup>
           <col style="width:34px"><col style="width:27%"><col style="width:7%"><col style="width:8%">
-          <col style="width:18%"><col style="width:7%"><col style="width:18%"><col style="width:60px">
+          <col style="width:14%"><col style="width:18%"><col style="width:7%"><col style="width:13%"><col style="width:60px">
         </colgroup>
         <thead>
           <tr>
@@ -540,13 +547,14 @@
             <th data-key="type"     onclick="sortFiles('type')" class="col-center">Type<span class="sort-ind">↕</span></th>
             <th data-key="size"     onclick="sortFiles('size')" class="col-num">Size<span class="sort-ind">↕</span></th>
             <th data-key="labels"   onclick="sortFiles('labels')">Labels<span class="sort-ind">↕</span></th>
+            <th data-key="status"   onclick="sortFiles('status')">Status<span class="sort-ind">↕</span></th>
             <th data-key="chunks"   onclick="sortFiles('chunks')" class="col-num">Chunks<span class="sort-ind">↕</span></th>
             <th data-key="added"    onclick="sortFiles('added')">Added<span class="sort-ind">↕</span></th>
             <th class="col-act"></th>
           </tr>
         </thead>
         <tbody id="fileTbody">
-          <tr><td colspan="8" class="empty-state">Loading…</td></tr>
+          <tr><td colspan="9" class="empty-state">Loading…</td></tr>
         </tbody>
       </table>
     </div>
@@ -729,7 +737,7 @@
 <script>
 let searchLimit=7,pollTimer=null,knownLabels=[];
 addEventListener('DOMContentLoaded',()=>{
-  loadSummary();loadUrls();loadConfig();loadLabels();initChipInput();initCopyButtons();switchTab('search');
+  loadSummary();loadUrls();loadConfig();loadLabels();initChipInput();initCopyButtons();loadFiles();switchTab('search');
   checkHealth();
   // '/' shortcut focuses search when no input is focused
   document.addEventListener('keydown',e=>{
@@ -847,12 +855,44 @@ function switchTab(name){
 }
 
 // ── Files ─────────────────────────────────────────────────────────
-let _filesSortKey=null,_filesSortAsc=true,_filesData=[],_selectedFiles=new Set();
+let _filesSortKey=null,_filesSortAsc=true,_filesData=[],_selectedFiles=new Set(),_filePollTimer=null;
 function sortFiles(key){_filesSortKey===key?_filesSortAsc=!_filesSortAsc:(_filesSortKey=key,_filesSortAsc=true);_renderFileTable();}
 function _fmtSize(bytes){if(!bytes) return '0 B';const u=['B','KB','MB','GB'];let i=0,v=bytes;while(v>=1024&&i<u.length-1){v/=1024;i++;}return v.toFixed(i===0?0:1)+'\u00a0'+u[i];}
 function _fmtFileType(type){return `<span class="badge-file badge-${type||'txt'}">${type||'?'}</span>`;}
 function _fmtFileDate(iso){try{return new Date(iso).toLocaleString();}catch{return iso||'';}}
-async function loadFiles(){try{_filesData=await (await fetch('/files')).json();_renderFileTable();}catch(e){}}
+function _isFileActive(f){return f.status==='pending'||f.status==='processing';}
+function _syncFilePolling(){
+  const active=_filesData.some(_isFileActive);
+  if(active&&!_filePollTimer){
+    _filePollTimer=setInterval(async()=>{await loadFiles({fromPoll:true});},1500);
+  }else if(!active&&_filePollTimer){
+    clearInterval(_filePollTimer);_filePollTimer=null;loadSummary();
+  }
+}
+async function loadFiles(opts={}){
+  try{
+    _filesData=await (await fetch('/files')).json();
+    _renderFileTable();
+    _syncFilePolling();
+  }catch(e){}
+}
+function _fmtFileStatus(f){
+  const status=f.status||'pending';
+  const stage=f.processing_stage||status;
+  const current=Number(f.progress_current||0),total=Number(f.progress_total||0);
+  const pct=total>0?Math.max(0,Math.min(100,Math.round((current/total)*100))):(status==='completed'?100:0);
+  const fallback=status==='completed'?'Indexed':stage;
+  const msg=f.progress_message||f.error_message||fallback;
+  const count=total>0?`${current}/${total}`:(status==='completed'?'Done':'Queued');
+  if(status==='completed'||status==='failed'){
+    return `<div><span class="badge badge-${esc(status)}">${esc(status)}</span>${msg?`<div class="file-progress-msg" title="${esc(msg)}">${esc(msg)}</div>`:''}</div>`;
+  }
+  return `<div class="file-progress">
+    <div class="file-progress-top"><span class="badge badge-${esc(status)}">${esc(stage)}</span><span>${count}</span></div>
+    <div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div>
+    <div class="file-progress-msg" title="${esc(msg)}">${esc(msg)}</div>
+  </div>`;
+}
 function _renderFileTable(){
   const tbody=document.getElementById('fileTbody');
   let data=[..._filesData];
@@ -864,6 +904,7 @@ function _renderFileTable(){
       else if(k==='type'){va=a.file_type||'';vb=b.file_type||'';}
       else if(k==='size'){va=a.file_size||0;vb=b.file_size||0;}
       else if(k==='labels'){va=(a.labels||[]).join(',');vb=(b.labels||[]).join(',');}
+      else if(k==='status'){va=(a.status||'')+(a.processing_stage||'');vb=(b.status||'')+(b.processing_stage||'');}
       else if(k==='chunks'){va=a.chunk_count||0;vb=b.chunk_count||0;}
       else if(k==='added'){va=a.created_at||'';vb=b.created_at||'';}
       else return 0;
@@ -876,15 +917,17 @@ function _renderFileTable(){
     const ind=th.querySelector('.sort-ind');
     if(ind) ind.textContent=th.dataset.key===_filesSortKey?(_filesSortAsc?'▲':'▼'):'↕';
   });
-  if(!data.length){tbody.innerHTML='<tr><td colspan="8" class="empty-state"><span class="icon">📄</span>No files uploaded yet</td></tr>';return;}
+  if(!data.length){tbody.innerHTML='<tr><td colspan="9" class="empty-state"><span class="icon">📄</span>No files uploaded yet</td></tr>';return;}
   tbody.innerHTML=data.map(f=>{
     const labels=(f.labels||[]).map(l=>`<span class="chip" style="font-size:0.7rem;padding:0.08rem 0.38rem">${esc(l)}</span>`).join(' ');
-    return `<tr class="${_selectedFiles.has(f.id)?'row-selected':''}">
+    const rowClass=[_selectedFiles.has(f.id)?'row-selected':'',_isFileActive(f)?'row-processing':''].filter(Boolean).join(' ');
+    return `<tr class="${rowClass}">
       <td class="col-cb"><input type="checkbox" ${_selectedFiles.has(f.id)?'checked':''} onchange="toggleFileSelect(${f.id},this.checked)"></td>
       <td class="mono">${esc(f.filename||'?')}</td>
       <td class="col-center">${_fmtFileType(f.file_type)}</td>
       <td class="col-num text-muted" style="font-size:0.78rem">${_fmtSize(f.file_size)}</td>
       <td>${labels||'<span class="text-muted">—</span>'}</td>
+      <td>${_fmtFileStatus(f)}</td>
       <td class="col-num">${f.chunk_count??0}</td>
       <td class="text-muted" style="font-size:0.75rem;white-space:nowrap">${_fmtFileDate(f.created_at)}</td>
       <td class="col-act"><button class="btn btn-danger btn-sm btn-icon" onclick="removeFile(${f.id})" title="Delete">🗑</button></td>

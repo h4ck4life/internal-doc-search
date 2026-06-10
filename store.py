@@ -75,6 +75,10 @@ def init_db() -> None:
                 content_sha256 TEXT,
                 status TEXT DEFAULT 'pending',
                 chunk_count INTEGER DEFAULT 0,
+                processing_stage TEXT DEFAULT 'queued',
+                progress_current INTEGER DEFAULT 0,
+                progress_total INTEGER DEFAULT 0,
+                progress_message TEXT DEFAULT '',
                 error_message TEXT,
                 created_at TEXT NOT NULL
             );
@@ -137,6 +141,10 @@ def init_db() -> None:
         _migrate_add_column(conn, "urls", "deep_crawl_exclude_pattern", "TEXT DEFAULT ''")
         _migrate_add_column(conn, "urls", "parent_url_id", "INTEGER REFERENCES urls(id)")
         _migrate_add_column(conn, "files", "content_sha256", "TEXT")
+        _migrate_add_column(conn, "files", "processing_stage", "TEXT DEFAULT 'queued'")
+        _migrate_add_column(conn, "files", "progress_current", "INTEGER DEFAULT 0")
+        _migrate_add_column(conn, "files", "progress_total", "INTEGER DEFAULT 0")
+        _migrate_add_column(conn, "files", "progress_message", "TEXT DEFAULT ''")
         _migrate_add_column(conn, "folder_watches", "process_id", "INTEGER")
         _migrate_add_column(conn, "folder_watches", "restart_count", "INTEGER DEFAULT 0")
         _migrate_add_column(conn, "folder_watches", "files_indexed", "INTEGER DEFAULT 0")
@@ -683,13 +691,75 @@ def update_file_status(
     status: str = "completed",
     chunk_count: int = 0,
     error_message: Optional[str] = None,
+    processing_stage: Optional[str] = None,
+    progress_current: Optional[int] = None,
+    progress_total: Optional[int] = None,
+    progress_message: Optional[str] = None,
 ) -> None:
     """Update processing status for a file after ingestion."""
     conn = _get_conn()
     try:
+        assignments = ["status = ?", "chunk_count = ?", "error_message = ?"]
+        values: list[Any] = [status, chunk_count, error_message]
+        if processing_stage is not None:
+            assignments.append("processing_stage = ?")
+            values.append(processing_stage)
+        if progress_current is not None:
+            assignments.append("progress_current = ?")
+            values.append(progress_current)
+        if progress_total is not None:
+            assignments.append("progress_total = ?")
+            values.append(progress_total)
+        if progress_message is not None:
+            assignments.append("progress_message = ?")
+            values.append(progress_message)
+        values.append(file_id)
         conn.execute(
-            "UPDATE files SET status=?, chunk_count=?, error_message=? WHERE id=?",
-            (status, chunk_count, error_message, file_id),
+            f"UPDATE files SET {', '.join(assignments)} WHERE id = ?",
+            values,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def update_file_progress(
+    file_id: int,
+    *,
+    status: str = "processing",
+    processing_stage: str,
+    progress_current: int = 0,
+    progress_total: int = 0,
+    progress_message: str = "",
+    chunk_count: Optional[int] = None,
+    error_message: Optional[str] = None,
+) -> None:
+    """Update in-flight file ingestion progress without losing final chunk_count."""
+    conn = _get_conn()
+    try:
+        assignments = [
+            "status = ?",
+            "processing_stage = ?",
+            "progress_current = ?",
+            "progress_total = ?",
+            "progress_message = ?",
+            "error_message = ?",
+        ]
+        values: list[Any] = [
+            status,
+            processing_stage,
+            progress_current,
+            progress_total,
+            progress_message,
+            error_message,
+        ]
+        if chunk_count is not None:
+            assignments.append("chunk_count = ?")
+            values.append(chunk_count)
+        values.append(file_id)
+        conn.execute(
+            f"UPDATE files SET {', '.join(assignments)} WHERE id = ?",
+            values,
         )
         conn.commit()
     finally:
