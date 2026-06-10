@@ -166,3 +166,19 @@ services:
 volumes:
   qdrant_data:
 ```
+
+## Optional GPU API Container with Podman
+
+The default compose stack runs the CPU API image. To expose an NVIDIA GPU to the API container with Podman, start the GPU API service explicitly:
+
+```bash
+podman compose up -d qdrant api-gpu
+```
+
+If the normal API is already running, stop it first because both services bind `localhost:8000`:
+
+```bash
+podman compose stop api
+```
+
+The GPU service uses `devices: nvidia.com/gpu=all`; the in-app GPU inference checkbox remains off by default until CUDA is visible inside the running container and the user enables it.

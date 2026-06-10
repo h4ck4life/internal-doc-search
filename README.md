@@ -405,7 +405,13 @@ The default compose stack runs the CPU API image. To expose an NVIDIA GPU to the
 podman compose up -d qdrant api-gpu
 ```
 
-The `api-gpu` service uses `devices: nvidia.com/gpu=all` and builds PyTorch from the CUDA wheel index. Stop the normal `api` service first if it is already running, because both services bind `localhost:8000`. The in-app GPU inference checkbox remains off by default and is disabled unless CUDA is visible inside the running container.
+If the normal API is already running, stop it first because both services bind `localhost:8000`:
+
+```bash
+podman compose stop api
+```
+
+The `api-gpu` service uses `devices: nvidia.com/gpu=all` and builds PyTorch from the CUDA wheel index. The in-app GPU inference checkbox remains off by default and is disabled unless CUDA is visible inside the running container.
 
 See [CONTAINER.md](CONTAINER.md) for the published image guide, multi-arch build instructions, and image size breakdown.
 
