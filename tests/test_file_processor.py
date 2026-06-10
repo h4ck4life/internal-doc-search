@@ -339,3 +339,35 @@ def test_process_file_multiple_labels(monkeypatch, temp_db):
     from file_processor import process_file
     result = process_file(b"text", "multi.txt", ["Auth", "API"], record["id"])
     assert result["chunks_stored"] == 2  # 1 chunk x 2 labels
+
+
+def test_process_file_upserts_qdrant_points_in_batches(monkeypatch, temp_db):
+    """Large file ingests should not send every point in one HTTP request."""
+    record = temp_db.add_file("batched.txt", "txt", 100, ["Docs"])
+    mock_chunks = [
+        {"text": f"chunk {idx}", "section_heading": ""}
+        for idx in range(5)
+    ]
+    mock_embeddings = [[float(idx)] * 768 for idx in range(5)]
+
+    _, mock_qdrant, _ = _mock_process_file_deps(
+        monkeypatch, mock_chunks, mock_embeddings,
+    )
+    monkeypatch.setenv("FILE_QDRANT_BATCH_SIZE", "2")
+    mock_client = MagicMock()
+    mock_col = MagicMock()
+    mock_col.name = "internal_docs"
+    mock_client.get_collections.return_value.collections = [mock_col]
+    mock_qdrant.QdrantClient.return_value = mock_client
+
+    from file_processor import process_file
+    result = process_file(b"text", "batched.txt", ["Docs"], record["id"])
+
+    assert result["status"] == "completed"
+    assert result["chunks_stored"] == 5
+    assert mock_client.upsert.call_count == 3
+    batch_lengths = [
+        len(call.kwargs["points"])
+        for call in mock_client.upsert.call_args_list
+    ]
+    assert batch_lengths == [2, 2, 1]

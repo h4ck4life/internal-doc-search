@@ -15,6 +15,9 @@ from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_QDRANT_TIMEOUT_SECONDS = 120
+DEFAULT_FILE_QDRANT_BATCH_SIZE = 64
+
 
 def _extract_pdf(content: bytes) -> str:
     """Extract text from PDF using PyMuPDF (fitz), page by page."""
@@ -125,6 +128,19 @@ def detect_file_type(filename: str) -> Optional[tuple[str, Callable[[bytes], str
     """
     ext = os.path.splitext(filename)[1].lower()
     return EXTENSION_MAP.get(ext)
+
+
+def _env_int(name: str, default: int, minimum: int = 1) -> int:
+    try:
+        return max(minimum, int(os.environ.get(name, str(default))))
+    except (TypeError, ValueError):
+        logger.warning("Invalid %s value; using %s", name, default)
+        return default
+
+
+def _iter_batches(items: list, batch_size: int):
+    for start in range(0, len(items), batch_size):
+        yield start, items[start:start + batch_size]
 
 
 def process_file(
@@ -298,7 +314,15 @@ def process_file(
     client = None
     try:
         progress("storing", 0, total_points, "Connecting to Qdrant")
-        client = QdrantClient(url=shared.QDRANT_URL, check_compatibility=False)
+        qdrant_timeout = _env_int(
+            "QDRANT_TIMEOUT_SECONDS",
+            DEFAULT_QDRANT_TIMEOUT_SECONDS,
+        )
+        client = QdrantClient(
+            url=shared.QDRANT_URL,
+            check_compatibility=False,
+            timeout=qdrant_timeout,
+        )
         collections = client.get_collections()
         exists = any(c.name == shared.COLLECTION_NAME for c in collections.collections)
         if not exists:
@@ -311,11 +335,28 @@ def process_file(
             )
 
         if all_points:
-            progress("storing", 0, total_points, f"Writing {total_points} vectors to Qdrant")
-            client.upsert(
-                collection_name=shared.COLLECTION_NAME,
-                points=all_points,
+            qdrant_batch_size = _env_int(
+                "FILE_QDRANT_BATCH_SIZE",
+                DEFAULT_FILE_QDRANT_BATCH_SIZE,
             )
+            progress(
+                "storing",
+                0,
+                total_points,
+                f"Writing {total_points} vectors to Qdrant",
+            )
+            for start, points_batch in _iter_batches(all_points, qdrant_batch_size):
+                client.upsert(
+                    collection_name=shared.COLLECTION_NAME,
+                    points=points_batch,
+                )
+                done = min(start + len(points_batch), total_points)
+                progress(
+                    "storing",
+                    done,
+                    total_points,
+                    f"Stored {done}/{total_points} vectors",
+                )
             progress("storing", total_points, total_points, f"Stored {total_points} vectors")
     finally:
         if client is not None:

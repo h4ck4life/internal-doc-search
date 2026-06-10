@@ -344,6 +344,8 @@ These are read at startup and override defaults. Set them in your shell or in `d
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `QDRANT_URL` | `http://localhost:6333` | Qdrant vector DB URL. Set to `http://qdrant:6333` in Docker Compose (service name). |
+| `QDRANT_TIMEOUT_SECONDS` | `120` | Qdrant HTTP client timeout for file-ingestion writes. Increase for slow storage or very large batches. |
+| `FILE_QDRANT_BATCH_SIZE` | `64` | Number of file-ingestion vectors sent to Qdrant per upsert request. Lower this if large PDF uploads hit write timeouts. |
 | `DATA_DIR` | `data` | Directory for the SQLite database (`config.db`). Persisted as a volume in Docker. |
 
 ### Folder Watcher Tuning
